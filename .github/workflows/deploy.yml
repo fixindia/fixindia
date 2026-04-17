@@ -47,7 +47,7 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             export PATH=$PATH:/home/ubuntu/.bun/bin
-            cd ~/civicmap-api
+            cd ~/fixindia
             git fetch --all
             git reset --hard origin/main
             cd server
