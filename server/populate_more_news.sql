@@ -1,0 +1,15 @@
+-- Add more news for Bengaluru and Chennai with unique URLs
+
+-- Bengaluru additional news
+INSERT INTO local_news (id, headline, url, source, snippet, is_tragic, city, location, published_at, confidence_score) VALUES
+(gen_random_uuid(), 'BBMP approves Rs 850 crore for Silk Board junction grade separator', 'https://example.com/silk-board-grade-separator-2026', 'Deccan Herald', 'Traffic congestion at notorious junction to be resolved with multi-level flyover project', false, 'bengaluru', ST_SetSRID(ST_MakePoint(77.6229, 12.9180), 4326), NOW() - INTERVAL '3 hours', 84),
+(gen_random_uuid(), 'Kempegowda International Airport Terminal 2 handles 2 million passengers', 'https://example.com/kia-terminal2-milestone-2026', 'Times of India', 'BIAL reports 40% increase in international traffic after new terminal inauguration', false, 'bengaluru', ST_SetSRID(ST_MakePoint(77.7064, 13.1986), 4326), NOW() - INTERVAL '7 hours', 87),
+(gen_random_uuid(), 'Cauvery Stage V water project faces land acquisition delays', 'https://example.com/cauvery-stage5-delay-2026', 'The Hindu', 'BWSSB unable to acquire 120 acres in Ramanagara district for pipeline corridor', true, 'bengaluru', ST_SetSRID(ST_MakePoint(77.5946, 12.9716), 4326), NOW() - INTERVAL '11 hours', 79),
+(gen_random_uuid(), 'Yeshwanthpur railway station redevelopment gets Rs 400 crore allocation', 'https://example.com/yeshwanthpur-redevelopment-2026', 'Indian Express', 'South Western Railway plans world-class amenities and expanded platforms', false, 'bengaluru', ST_SetSRID(ST_MakePoint(77.5385, 13.0222), 4326), NOW() - INTERVAL '15 hours', 82);
+
+-- Chennai additional news
+INSERT INTO local_news (id, headline, url, source, snippet, is_tragic, city, location, published_at, confidence_score) VALUES
+(gen_random_uuid(), 'Chennai Port handles record 1.5 million TEUs in Q1 2026', 'https://example.com/chennai-port-record-2026', 'Economic Times', 'Container traffic increases by 25% compared to previous year', false, 'chennai', ST_SetSRID(ST_MakePoint(80.3002, 13.1067), 4326), NOW() - INTERVAL '4 hours', 86),
+(gen_random_uuid(), 'GCC announces Rs 600 crore stormwater drain project for North Chennai', 'https://example.com/chennai-stormwater-drain-2026', 'The Hindu', 'Civic body plans 45km network to prevent flooding in monsoon-prone areas', false, 'chennai', ST_SetSRID(ST_MakePoint(80.2785, 13.1067), 4326), NOW() - INTERVAL '8 hours', 83),
+(gen_random_uuid(), 'Cooum river cleanup: 80% sewage diversion completed', 'https://example.com/cooum-cleanup-progress-2026', 'Times of India', 'State government reports significant improvement in water quality after treatment plant installation', false, 'chennai', ST_SetSRID(ST_MakePoint(80.2785, 13.0569), 4326), NOW() - INTERVAL '12 hours', 81),
+(gen_random_uuid(), 'OMR IT corridor faces severe traffic congestion during peak hours', 'https://example.com/omr-traffic-congestion-2026', 'Deccan Chronicle', 'Tech employees demand immediate infrastructure upgrades on 20km stretch', true, 'chennai', ST_SetSRID(ST_MakePoint(80.2329, 12.9121), 4326), NOW() - INTERVAL '16 hours', 78);

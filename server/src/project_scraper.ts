@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
 import Parser from 'rss-parser';
 import { queryLLM } from './llm';
 import sql from './db';

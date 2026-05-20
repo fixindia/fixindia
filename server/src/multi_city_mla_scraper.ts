@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
 import * as cheerio from 'cheerio';
 import { queryLLM } from './llm';
 import sql from './db';

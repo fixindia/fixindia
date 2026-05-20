@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 
 const TIPS = [
@@ -9,8 +9,7 @@ const TIPS = [
 ];
 
 export default function SplashScreen({ onComplete }: { onComplete: () => void }) {
-  // Lock in a single random tip for the duration of the component lifecycle
-  const selectedTip = useMemo(() => TIPS[Math.floor(Math.random() * TIPS.length)], []);
+  const [selectedTip] = useState(() => TIPS[Math.floor(Math.random() * TIPS.length)]);
 
   useEffect(() => {
     // End splash after 5 seconds to simulate map load

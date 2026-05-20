@@ -1,0 +1,37 @@
+- generic [ref=e3]:
+  - banner:
+    - generic [ref=e4]:
+      - img "FixIndia.org" [ref=e6]
+      - heading "FixIndia.org" [level=1] [ref=e7]
+    - generic [ref=e8]:
+      - button "News" [ref=e9]:
+        - img [ref=e10]
+        - generic [ref=e13]: News
+      - button [ref=e14]:
+        - img [ref=e15]
+      - button [ref=e18]:
+        - img [ref=e19]
+  - generic [ref=e20]:
+    - generic [ref=e21]:
+      - img "FixIndia.org Logo" [ref=e24]
+      - heading "FixIndia.org" [level=1] [ref=e25]
+      - generic [ref=e28]: Bringing India's voice together...
+    - generic [ref=e30]: Verify overlapping issues to highlight urgency.
+  - generic [ref=e32]:
+    - generic [ref=e33]:
+      - img [ref=e35]
+      - generic [ref=e38]:
+        - heading "Trending" [level=2] [ref=e39]
+        - paragraph [ref=e40]: City-Wide News
+    - button [ref=e41]:
+      - img [ref=e42]
+  - generic [ref=e47]:
+    - generic [ref=e48]:
+      - generic:
+        - img
+        - generic: Swipe Up For Leaderboard
+    - generic [ref=e51]:
+      - generic [ref=e52]:
+        - generic [ref=e53]: Bengaluru Civic
+        - generic [ref=e54]: 0 Active Issues
+      - button "Report Issue" [ref=e55]

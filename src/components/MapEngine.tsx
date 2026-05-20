@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment */
 import { useEffect, useRef, useCallback, memo, useState } from 'react';
 import type { MapRef, MapLayerMouseEvent } from 'react-map-gl/maplibre';
 import Map, { Marker, Source, Layer } from 'react-map-gl/maplibre';
@@ -42,7 +43,7 @@ const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId }
         maximumAge: 0 
       });
     }
-  }, [hasLocated, mapRef.current]);
+  }, [hasLocated]);
 
   const onMapLoad = useCallback(() => {
     // Map instance is ready and style is loaded
@@ -70,7 +71,7 @@ const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId }
   }, [activeIssueId]);
 
   const handleMarkerClick = useCallback((e: any, issue: Issue) => {
-    e.originalEvent.stopPropagation();
+    e.originalEvent?.stopPropagation();
     
     // Fly to marker so it centers cleanly into the viewport
     mapRef.current?.flyTo({

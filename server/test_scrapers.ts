@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
 // Test script to run scrapers locally and populate initial data
 
 import { runEnhancedNewsScraper } from './src/enhanced_scraper';

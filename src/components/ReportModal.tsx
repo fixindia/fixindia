@@ -20,7 +20,9 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (isOpen) setStep(1);
+    if (!isOpen) {
+      setTimeout(() => setStep(1), 400); // Reset state after close animation
+    }
   }, [isOpen]);
 
   const handleAuth = () => {
@@ -125,7 +127,7 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
           </motion.div>
         );
 
-      case 3:
+      case 3: {
         const categories: IssueCategory[] = ['Pothole', 'Broken Footpath', 'Drainage', 'Streetlight', 'Other'];
         
         return (
@@ -173,6 +175,7 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
             </button>
           </motion.div>
         );
+      }
 
       case 4:
         return (
@@ -209,7 +212,7 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
           >
             <div className="flex justify-between items-center mb-8">
               {step > 1 && step < 4 ? (
-                <button onClick={() => setStep(step - 1 as any)} className="w-10 h-10 bg-white/5 rounded-full flex items-center justify-center hover:bg-white/10 border border-white/10">
+                <button onClick={() => setStep((step - 1) as 1 | 2 | 3)} className="w-10 h-10 bg-white/5 rounded-full flex items-center justify-center hover:bg-white/10 border border-white/10">
                   <ChevronLeft size={20} />
                 </button>
               ) : <div className="w-10" />}

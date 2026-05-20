@@ -1,0 +1,174 @@
+- generic [ref=e3]:
+  - banner:
+    - generic [ref=e4]:
+      - img "FixIndia.org" [ref=e6]
+      - heading "FixIndia.org" [level=1] [ref=e7]
+    - generic [ref=e8]:
+      - button "News" [active] [ref=e9]:
+        - img [ref=e10]
+        - generic [ref=e13]: News
+      - button [ref=e14]:
+        - img [ref=e15]
+      - button [ref=e18]:
+        - img [ref=e19]
+  - generic [ref=e21]:
+    - generic [ref=e22]:
+      - generic [ref=e23]:
+        - img [ref=e25]
+        - generic [ref=e28]:
+          - heading "Trending" [level=2] [ref=e29]
+          - paragraph [ref=e30]: City-Wide News
+      - button [ref=e31]:
+        - img [ref=e32]
+    - generic [ref=e34]:
+      - link "The Hindu 3 hours ago Bengaluru Metro Phase 3 construction begins BMRCL announces start of construction for 32km Phase 3 corridor connecting Outer Ring Road" [ref=e35] [cursor=pointer]:
+        - /url: https://example.com/bengaluru-metro-phase3
+        - generic [ref=e36]:
+          - generic [ref=e37]: The Hindu
+          - generic [ref=e38]: 3 hours ago
+        - heading "Bengaluru Metro Phase 3 construction begins" [level=3] [ref=e39]
+        - paragraph [ref=e40]: BMRCL announces start of construction for 32km Phase 3 corridor connecting Outer Ring Road
+      - link "Deccan Herald 3 hours ago BBMP approves Rs 850 crore for Silk Board junction grade separator Traffic congestion at notorious junction to be resolved with multi-level flyover project" [ref=e41] [cursor=pointer]:
+        - /url: https://example.com/silk-board-grade-separator-2026
+        - generic [ref=e42]:
+          - generic [ref=e43]: Deccan Herald
+          - generic [ref=e44]: 3 hours ago
+        - heading "BBMP approves Rs 850 crore for Silk Board junction grade separator" [level=3] [ref=e45]
+        - paragraph [ref=e46]: Traffic congestion at notorious junction to be resolved with multi-level flyover project
+      - link "Mumbai Mirror 3 hours ago Mumbai Metro Line 3 achieves 95% completion milestone MMRCL announces trial runs to begin next month on 33.5km underground corridor from Colaba to SEEPZ" [ref=e47] [cursor=pointer]:
+        - /url: https://example.com/mumbai-metro-line3
+        - generic [ref=e48]:
+          - generic [ref=e49]: Mumbai Mirror
+          - generic [ref=e50]: 3 hours ago
+        - heading "Mumbai Metro Line 3 achieves 95% completion milestone" [level=3] [ref=e51]
+        - paragraph [ref=e52]: MMRCL announces trial runs to begin next month on 33.5km underground corridor from Colaba to SEEPZ
+      - link "Deccan Chronicle 4 hours ago Hyderabad ORR expansion approved State government approves 158km Outer Ring Road expansion to ease traffic congestion" [ref=e53] [cursor=pointer]:
+        - /url: https://example.com/hyderabad-orr
+        - generic [ref=e54]:
+          - generic [ref=e55]: Deccan Chronicle
+          - generic [ref=e56]: 4 hours ago
+        - heading "Hyderabad ORR expansion approved" [level=3] [ref=e57]
+        - paragraph [ref=e58]: State government approves 158km Outer Ring Road expansion to ease traffic congestion
+      - link "Economic Times 4 hours ago Chennai Port handles record 1.5 million TEUs in Q1 2026 Container traffic increases by 25% compared to previous year" [ref=e59] [cursor=pointer]:
+        - /url: https://example.com/chennai-port-record-2026
+        - generic [ref=e60]:
+          - generic [ref=e61]: Economic Times
+          - generic [ref=e62]: 4 hours ago
+        - heading "Chennai Port handles record 1.5 million TEUs in Q1 2026" [level=3] [ref=e63]
+        - paragraph [ref=e64]: Container traffic increases by 25% compared to previous year
+      - link "The Hindu 4 hours ago Delhi Metro extends Pink Line to Maujpur with 3 new stations DMRC inaugurates 7.5km extension improving connectivity to Northeast Delhi neighborhoods" [ref=e65] [cursor=pointer]:
+        - /url: https://example.com/delhi-metro-pink-extension
+        - generic [ref=e66]:
+          - generic [ref=e67]: The Hindu
+          - generic [ref=e68]: 4 hours ago
+        - heading "Delhi Metro extends Pink Line to Maujpur with 3 new stations" [level=3] [ref=e69]
+        - paragraph [ref=e70]: DMRC inaugurates 7.5km extension improving connectivity to Northeast Delhi neighborhoods
+      - link "Deccan Chronicle 5 hours ago Hyderabad Metro Rail extends services to Shamshabad Airport L&T Metro Rail completes 31km Airport Line connecting Raidurg to RGIA" [ref=e71] [cursor=pointer]:
+        - /url: https://example.com/hyderabad-metro-airport
+        - generic [ref=e72]:
+          - generic [ref=e73]: Deccan Chronicle
+          - generic [ref=e74]: 5 hours ago
+        - heading "Hyderabad Metro Rail extends services to Shamshabad Airport" [level=3] [ref=e75]
+        - paragraph [ref=e76]: L&T Metro Rail completes 31km Airport Line connecting Raidurg to RGIA
+      - link "Times of India 6 hours ago Mumbai Coastal Road project 60% complete BMC reports significant progress on the 29.2km coastal road project expected to reduce travel time" [ref=e77] [cursor=pointer]:
+        - /url: https://example.com/mumbai-coastal-road
+        - generic [ref=e78]:
+          - generic [ref=e79]: Times of India
+          - generic [ref=e80]: 6 hours ago
+        - heading "Mumbai Coastal Road project 60% complete" [level=3] [ref=e81]
+        - paragraph [ref=e82]: BMC reports significant progress on the 29.2km coastal road project expected to reduce travel time
+      - link "Indian Express 6 hours ago BMC identifies 127 dangerous buildings in island city Civic body issues evacuation notices to residents of dilapidated structures in Girgaon and Kalbadevi areas" [ref=e83] [cursor=pointer]:
+        - /url: https://example.com/mumbai-dangerous-buildings
+        - generic [ref=e84]:
+          - generic [ref=e85]: Indian Express
+          - generic [ref=e86]: 6 hours ago
+        - heading "BMC identifies 127 dangerous buildings in island city" [level=3] [ref=e87]
+        - paragraph [ref=e88]: Civic body issues evacuation notices to residents of dilapidated structures in Girgaon and Kalbadevi areas
+      - link "The Hindu 7 hours ago Chennai Metro Rail Phase 2 work accelerates CMRL fast-tracks construction of 118km Phase 2 corridors across the city" [ref=e89] [cursor=pointer]:
+        - /url: https://example.com/chennai-metro-phase2
+        - generic [ref=e90]:
+          - generic [ref=e91]: The Hindu
+          - generic [ref=e92]: 7 hours ago
+        - heading "Chennai Metro Rail Phase 2 work accelerates" [level=3] [ref=e93]
+        - paragraph [ref=e94]: CMRL fast-tracks construction of 118km Phase 2 corridors across the city
+      - link "Times of India 7 hours ago Kempegowda International Airport Terminal 2 handles 2 million passengers BIAL reports 40% increase in international traffic after new terminal inauguration" [ref=e95] [cursor=pointer]:
+        - /url: https://example.com/kia-terminal2-milestone-2026
+        - generic [ref=e96]:
+          - generic [ref=e97]: Times of India
+          - generic [ref=e98]: 7 hours ago
+        - heading "Kempegowda International Airport Terminal 2 handles 2 million passengers" [level=3] [ref=e99]
+        - paragraph [ref=e100]: BIAL reports 40% increase in international traffic after new terminal inauguration
+      - link "Telegraph India 7 hours ago Kolkata Metro extends Purple Line to Joka with 6 new stations Metro Railway completes 16.5km extension connecting South Kolkata to Joka" [ref=e101] [cursor=pointer]:
+        - /url: https://example.com/kolkata-metro-joka
+        - generic [ref=e102]:
+          - generic [ref=e103]: Telegraph India
+          - generic [ref=e104]: 7 hours ago
+        - heading "Kolkata Metro extends Purple Line to Joka with 6 new stations" [level=3] [ref=e105]
+        - paragraph [ref=e106]: Metro Railway completes 16.5km extension connecting South Kolkata to Joka
+      - link "Indian Express 7 hours ago Air quality deteriorates to severe category in 12 monitoring stations CPCB data shows AQI crossing 400 mark in Anand Vihar, Rohini and Dwarka areas" [ref=e107] [cursor=pointer]:
+        - /url: https://example.com/delhi-air-quality
+        - generic [ref=e108]:
+          - generic [ref=e109]: Indian Express
+          - generic [ref=e110]: 7 hours ago
+        - heading "Air quality deteriorates to severe category in 12 monitoring stations" [level=3] [ref=e111]
+        - paragraph [ref=e112]: CPCB data shows AQI crossing 400 mark in Anand Vihar, Rohini and Dwarka areas
+      - link "The Hindu 8 hours ago GCC announces Rs 600 crore stormwater drain project for North Chennai Civic body plans 45km network to prevent flooding in monsoon-prone areas" [ref=e113] [cursor=pointer]:
+        - /url: https://example.com/chennai-stormwater-drain-2026
+        - generic [ref=e114]:
+          - generic [ref=e115]: The Hindu
+          - generic [ref=e116]: 8 hours ago
+        - heading "GCC announces Rs 600 crore stormwater drain project for North Chennai" [level=3] [ref=e117]
+        - paragraph [ref=e118]: Civic body plans 45km network to prevent flooding in monsoon-prone areas
+      - link "Telangana Today 9 hours ago GHMC demolishes 23 illegal structures in Kukatpally Civic body takes action against unauthorized constructions violating building regulations" [ref=e119] [cursor=pointer]:
+        - /url: https://example.com/ghmc-demolition
+        - generic [ref=e120]:
+          - generic [ref=e121]: Telangana Today
+          - generic [ref=e122]: 9 hours ago
+        - heading "GHMC demolishes 23 illegal structures in Kukatpally" [level=3] [ref=e123]
+        - paragraph [ref=e124]: Civic body takes action against unauthorized constructions violating building regulations
+      - link "Times of India 10 hours ago Coastal Road project opens new 5km stretch in Worli Rs 12,000 crore infrastructure project reduces travel time between South Mumbai and Western suburbs by 30 minutes" [ref=e125] [cursor=pointer]:
+        - /url: https://example.com/coastal-road-worli
+        - generic [ref=e126]:
+          - generic [ref=e127]: Times of India
+          - generic [ref=e128]: 10 hours ago
+        - heading "Coastal Road project opens new 5km stretch in Worli" [level=3] [ref=e129]
+        - paragraph [ref=e130]: Rs 12,000 crore infrastructure project reduces travel time between South Mumbai and Western suburbs by 30 minutes
+      - link "The Hindu 11 hours ago Cauvery Stage V water project faces land acquisition delays BWSSB unable to acquire 120 acres in Ramanagara district for pipeline corridor" [ref=e131] [cursor=pointer]:
+        - /url: https://example.com/cauvery-stage5-delay-2026
+        - generic [ref=e132]:
+          - generic [ref=e133]: The Hindu
+          - generic [ref=e134]: 11 hours ago
+        - heading "Cauvery Stage V water project faces land acquisition delays" [level=3] [ref=e135]
+        - paragraph [ref=e136]: BWSSB unable to acquire 120 acres in Ramanagara district for pipeline corridor
+      - link "Times of India 11 hours ago KMC identifies 89 buildings at risk of collapse in monsoon Municipal corporation issues notices to owners of century-old structures in North Kolkata" [ref=e137] [cursor=pointer]:
+        - /url: https://example.com/kolkata-building-risk
+        - generic [ref=e138]:
+          - generic [ref=e139]: Times of India
+          - generic [ref=e140]: 11 hours ago
+        - heading "KMC identifies 89 buildings at risk of collapse in monsoon" [level=3] [ref=e141]
+        - paragraph [ref=e142]: Municipal corporation issues notices to owners of century-old structures in North Kolkata
+      - link "Times of India 11 hours ago PWD completes resurfacing of 45km roads in South Delhi Department spends Rs 120 crore on infrastructure upgrade covering Hauz Khas, Saket and Vasant Vihar" [ref=e143] [cursor=pointer]:
+        - /url: https://example.com/delhi-road-resurfacing
+        - generic [ref=e144]:
+          - generic [ref=e145]: Times of India
+          - generic [ref=e146]: 11 hours ago
+        - heading "PWD completes resurfacing of 45km roads in South Delhi" [level=3] [ref=e147]
+        - paragraph [ref=e148]: Department spends Rs 120 crore on infrastructure upgrade covering Hauz Khas, Saket and Vasant Vihar
+      - 'link "Times of India 12 hours ago Cooum river cleanup: 80% sewage diversion completed State government reports significant improvement in water quality after treatment plant installation" [ref=e149] [cursor=pointer]':
+        - /url: https://example.com/cooum-cleanup-progress-2026
+        - generic [ref=e150]:
+          - generic [ref=e151]: Times of India
+          - generic [ref=e152]: 12 hours ago
+        - 'heading "Cooum river cleanup: 80% sewage diversion completed" [level=3] [ref=e153]'
+        - paragraph [ref=e154]: State government reports significant improvement in water quality after treatment plant installation
+  - region "Map" [ref=e157]
+  - generic [ref=e159]:
+    - generic [ref=e160]:
+      - generic:
+        - img
+        - generic: Swipe Up For Leaderboard
+    - generic [ref=e163]:
+      - generic [ref=e164]:
+        - generic [ref=e165]: Bengaluru Civic
+        - generic [ref=e166]: 0 Active Issues
+      - button "Report Issue" [ref=e167]

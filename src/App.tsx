@@ -64,16 +64,20 @@ function App() {
       };
       syncUser();
     }
-  }, [isSignedIn, user]);
+  }, [isSignedIn, user, getToken]);
 
   useEffect(() => {
     if (activeContentPage === 'verify') {
-      setIsVerifyQueueOpen(true);
-      setActiveContentPage(null);
+      setTimeout(() => {
+        setIsVerifyQueueOpen(true);
+        setActiveContentPage(null);
+      }, 0);
     }
     if (activeContentPage === 'liveability') {
-      setIsLiveabilityOpen(true);
-      setActiveContentPage(null);
+      setTimeout(() => {
+        setIsLiveabilityOpen(true);
+        setActiveContentPage(null);
+      }, 0);
     }
   }, [activeContentPage]);
 
@@ -120,18 +124,8 @@ function App() {
       {
         enableHighAccuracy: true,
         timeout: 10000,
-        maximumAge: 0
       }
     );
-        mla: 'TBD',
-        sanctionedBudget: 'Verification Required',
-        upvotes: 0,
-        verificationCount: 0,
-        isMine: true,
-        timestamp: 'Just now'
-      };
-      setIssues([newIssue, ...issues]);
-    }
   };
 
   const handleNeighborhoodVerify = (id: string, isValid: boolean) => {

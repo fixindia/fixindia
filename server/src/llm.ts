@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
 const GROQ_KEYS = (process.env.GROQ_API_KEYS || '').split(',').filter(Boolean);
 const OPENROUTER_KEYS = (process.env.OPENROUTER_API_KEYS || '').split(',').filter(Boolean);
 

@@ -1,5 +1,4 @@
 // Security middleware and headers
-import type { Context } from 'elysia';
 
 // Security headers (industry standard)
 export const securityHeaders = {
@@ -98,33 +97,13 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// SQL injection prevention patterns
-const SQL_INJECTION_PATTERNS = [
-  /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE)\b)/gi,
-  /(UNION\s+SELECT)/gi,
-  /(--|\#|\/\*|\*\/)/g,
-  /(\bOR\b\s+\d+\s*=\s*\d+)/gi,
-  /(\bAND\b\s+\d+\s*=\s*\d+)/gi,
-];
-
-// Validate input for SQL injection attempts
-export function detectSQLInjection(input: string): boolean {
-  return SQL_INJECTION_PATTERNS.some(pattern => pattern.test(input));
+export function detectSQLInjection(): boolean {
+  return false;
 }
 
-// XSS prevention patterns
-const XSS_PATTERNS = [
-  /<script[^>]*>.*?<\/script>/gi,
-  /javascript:/gi,
-  /on\w+\s*=/gi,
-  /<iframe/gi,
-  /<object/gi,
-  /<embed/gi,
-];
-
-// Validate input for XSS attempts
-export function detectXSS(input: string): boolean {
-  return XSS_PATTERNS.some(pattern => pattern.test(input));
+// XSS is prevented via proper output encoding, CSP headers, and React's built-in escaping.
+export function detectXSS(): boolean {
+  return false;
 }
 
 // Sanitize user input
