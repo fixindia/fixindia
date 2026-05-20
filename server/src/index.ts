@@ -433,24 +433,26 @@ const app = new Elysia()
   // ─── Leaderboard: Wall of Shame ──────────────
   .get('/api/leaderboard/shame', async () => {
     const mlas = await sql`
-      SELECT 
-        mla_name AS name,
-        ward_name AS ward,
-        COUNT(*) FILTER (WHERE status = 'open') AS unresolved_count
-      FROM reports
-      WHERE mla_name IS NOT NULL AND mla_name != 'TBD'
-      GROUP BY mla_name, ward_name
-      HAVING COUNT(*) FILTER (WHERE status = 'open') > 0
-      ORDER BY unresolved_count DESC
-      LIMIT 20
+      SELECT
+        m.id,
+        m.name,
+        m.constituency AS ward,
+        m.city,
+        COUNT(CASE WHEN r.status = 'open' THEN 1 END) AS unresolved_count
+      FROM mlas m
+      LEFT JOIN reports r ON r.mla_name = m.name
+      GROUP BY m.id, m.name, m.constituency, m.city
+      ORDER BY unresolved_count DESC, m.name ASC
+      LIMIT 50
     `;
 
     return {
       mlas: mlas.map((m: any, i: number) => ({
-        id: `mla-${i + 1}`,
+        id: m.id,
         name: m.name,
         ward: m.ward,
-        unresolvedCount: parseInt(m.unresolved_count),
+        city: m.city,
+        unresolvedCount: Number(m.unresolved_count) || 0,
         rank: i + 1,
       })),
     };
@@ -481,6 +483,55 @@ const app = new Elysia()
         isTragic: n.is_tragic,
       })),
     };
+  })
+
+  // ─── All News ────────────────────────────────
+  .get('/api/news', async () => {
+    const news = await sql`
+      SELECT id, headline, url, source, snippet, is_tragic, city,
+        ST_Y(location::geometry) as latitude,
+        ST_X(location::geometry) as longitude,
+        published_at
+      FROM local_news
+      WHERE confidence_score >= 40
+      ORDER BY published_at DESC
+      LIMIT 50
+    `;
+    return {
+      news: news.map((n: any) => ({
+        id: n.id,
+        source: n.source,
+        title: n.headline,
+        url: n.url,
+        date: formatRelativeTime(n.published_at),
+        snippet: n.snippet,
+        isTragic: n.is_tragic,
+        city: n.city,
+        location: { lat: n.latitude, lng: n.longitude }
+      }))
+    };
+  })
+
+  // ─── Local News (Alias) ──────────────────────
+  .get('/api/local-news', async () => {
+    const news = await sql`
+      SELECT id, headline, url, source, snippet, city, published_at
+      FROM local_news
+      WHERE confidence_score >= 40
+      ORDER BY published_at DESC
+      LIMIT 50
+    `;
+    return { news };
+  })
+
+  // ─── MLAs ────────────────────────────────────
+  .get('/api/mlas', async () => {
+    const mlas = await sql`
+      SELECT id, name, party, constituency, city, state, contact, email
+      FROM mlas
+      ORDER BY city, name
+    `;
+    return { mlas };
   })
 
   // ─── Scraper Trigger (ADMIN ONLY) ────────────
