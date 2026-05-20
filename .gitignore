@@ -1,0 +1,32 @@
+# System files
+.DS_Store
+*.log
+
+# SSH keys and credentials
+SSH/
+*.key
+*.pem
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Session documentation (not for production)
+SESSION_SUMMARY.md
+CODE_REVIEW.md
+COMPLETE_SUMMARY.md
+DEPLOYMENT.md
+FINAL_DEPLOYMENT_GUIDE.md
+FIXES_APPLIED.md
+SCRAPING_COMPLETE.md
+SCRAPING_SYSTEM.md
+SECURITY_ENHANCEMENTS.md
+
+# Dependencies
+node_modules/
+.bun/
+
+# Build outputs
+dist/
+build/

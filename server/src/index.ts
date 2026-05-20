@@ -5,48 +5,55 @@ import { storage } from './lib/storage';
 import { runNewsScraper } from './scraper';
 import { runProjectScraper } from './project_scraper';
 import { runMlaScraper } from './mla_scraper';
+import { runEnhancedNewsScraper } from './enhanced_scraper';
+import { runMultiCityMLAScraper } from './multi_city_mla_scraper';
+import { submitVolunteerData, getPendingSubmissions, verifySubmission } from './volunteer_system';
+import { securityHeaders, generateFingerprint, checkRateLimit, detectSQLInjection, detectXSS, sanitizeInput } from './security';
 import cron from 'node-cron';
+import { validateEnv } from './config';
+import { SCRAPING_SCHEDULE } from './config/cities';
+
+// Validate environment variables on startup
+validateEnv();
 
 // ─── Security: In-memory rate limiter ──────────
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-
-function isRateLimited(ip: string, maxReqs: number, windowMs: number): boolean {
-  const now = Date.now();
-  const entry = rateLimitMap.get(ip);
-
-  if (!entry || now > entry.resetAt) {
-    rateLimitMap.set(ip, { count: 1, resetAt: now + windowMs });
-    return false;
-  }
-
-  entry.count++;
-  if (entry.count > maxReqs) return true;
-  return false;
-}
-
-// Cleanup stale entries every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, entry] of rateLimitMap) {
-    if (now > entry.resetAt) rateLimitMap.delete(ip);
-  }
-}, 5 * 60 * 1000);
+// Now using enhanced fingerprinting from security.ts
 
 // Admin key for sensitive operations
 const ADMIN_KEY = process.env.ADMIN_KEY;
 if (!ADMIN_KEY) {
-  // In dev we might want a fallback, but in production we MUST throw
   if (process.env.NODE_ENV === 'production') {
     throw new Error('ADMIN_KEY environment variable is not set');
   }
+  console.warn('⚠️  ADMIN_KEY not set. Admin endpoints will be disabled.');
 }
 
-// Allowed frontend origins
+// Constant-time string comparison to prevent timing attacks
+function constantTimeCompare(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
+// Admin authentication middleware
+function requireAdmin(adminKey: string | null): boolean {
+  if (!ADMIN_KEY) return false;
+  if (!adminKey) return false;
+  return constantTimeCompare(adminKey, ADMIN_KEY);
+}
+
+// Allowed frontend origins (strict matching)
 const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:5173',
-  /\.pages\.dev$/,
-  /civicmap/i,
+  'https://fixindia.org',
+  'https://www.fixindia.org',
+  'https://fixindia.pages.dev',
+  'https://help.fixindia.org',
+  'https://builder.fixindia.org',
 ];
 
 const app = new Elysia()
@@ -57,19 +64,25 @@ const app = new Elysia()
     credentials: true,
   }))
 
-  // ─── Global rate limiting guard ──────────────
-  .onBeforeHandle(({ request, set }) => {
-    const ip = request.headers.get('x-forwarded-for')
-      || request.headers.get('cf-connecting-ip')
-      || 'unknown';
+  // ─── Security Headers ────────────────────────
+  .onAfterHandle(({ set }) => {
+    Object.entries(securityHeaders).forEach(([key, value]) => {
+      set.headers[key] = value;
+    });
+  })
 
-    // POST endpoints: 30 req/min | GET: 120 req/min
+  // ─── Enhanced Rate Limiting with Fingerprinting ───
+  .onBeforeHandle(({ request, set }) => {
+    const fingerprint = generateFingerprint(request);
     const isWrite = request.method === 'POST' || request.method === 'PUT';
     const limit = isWrite ? 30 : 120;
 
-    if (isRateLimited(ip, limit, 60_000)) {
+    const result = checkRateLimit(fingerprint, limit, 60_000);
+
+    if (!result.allowed) {
       set.status = 429;
-      return { error: 'Too many requests. Slow down.', retryAfter: 60 };
+      set.headers['Retry-After'] = String(result.retryAfter || 60);
+      return { error: 'Too many requests. Slow down.', retryAfter: result.retryAfter };
     }
   })
 
@@ -149,7 +162,8 @@ const app = new Elysia()
         isTragic: n.is_tragic,
       }));
 
-      const signedUrl = r.image_url ? await storage.getSignedUrl(r.image_url) : null;
+      // Use public URL instead of signed URL (no API call needed!)
+      const imageUrl = r.image_url ? storage.getPublicUrl(r.image_url) : null;
 
       return {
         id: r.id,
@@ -171,7 +185,7 @@ const app = new Elysia()
         zone: r.zone,
         parliament: r.parliamentary_constituency,
         mp: r.mp_name,
-        imageUrl: signedUrl,
+        imageUrl: imageUrl,
       };
     }));
 
@@ -197,8 +211,9 @@ const app = new Elysia()
     `;
 
     const issues = await Promise.all(reports.map(async (r: any) => {
-      const signedUrl = r.image_url ? await storage.getSignedUrl(r.image_url) : null;
-      
+      // Use public URL instead of signed URL
+      const imageUrl = r.image_url ? storage.getPublicUrl(r.image_url) : null;
+
       return {
         id: r.id,
         latitude: r.latitude,
@@ -218,7 +233,7 @@ const app = new Elysia()
         zone: r.zone,
         parliament: r.parliamentary_constituency,
         mp: r.mp_name,
-        imageUrl: signedUrl,
+        imageUrl: imageUrl,
       };
     }));
 
@@ -228,13 +243,41 @@ const app = new Elysia()
   // ─── Submit Report (validated) ────────────────
   .post('/api/reports', async ({ body, set }) => {
     const { title, category, customCategory, latitude, longitude, severity, creatorId, image } = body as any;
-    
+
+    // Security: Detect SQL injection attempts
+    if (title && detectSQLInjection(title)) {
+      set.status = 400;
+      return { error: 'Invalid input detected' };
+    }
+
+    // Security: Detect XSS attempts
+    if (title && detectXSS(title)) {
+      set.status = 400;
+      return { error: 'Invalid input detected' };
+    }
+
     let imageUrl = null;
     if (image instanceof File) {
+      // Validate image size (10MB max)
+      const MAX_SIZE = 10 * 1024 * 1024;
+      if (image.size > MAX_SIZE) {
+        set.status = 400;
+        return { error: 'Image too large. Maximum 10MB allowed.' };
+      }
+
+      // Validate image type
+      const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+      if (!allowedTypes.includes(image.type)) {
+        set.status = 400;
+        return { error: 'Invalid image type. Only JPEG, PNG, and WebP allowed.' };
+      }
+
       try {
         imageUrl = await storage.uploadImage(image);
       } catch (e) {
-        console.warn('Image upload failed, continuing without image:', e);
+        console.error('Image upload failed:', e);
+        set.status = 500;
+        return { error: 'Image upload failed. Please try again.' };
       }
     }
 
@@ -247,8 +290,12 @@ const app = new Elysia()
       set.status = 400;
       return { error: 'Category is required.' };
     }
-    if (typeof latitude !== 'number' || typeof longitude !== 'number'
-      || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+    // Strict coordinate validation
+    if (typeof latitude !== 'number' || typeof longitude !== 'number' ||
+        isNaN(latitude) || isNaN(longitude) ||
+        !isFinite(latitude) || !isFinite(longitude) ||
+        latitude < -90 || latitude > 90 ||
+        longitude < -180 || longitude > 180) {
       set.status = 400;
       return { error: 'Invalid coordinates.' };
     }
@@ -439,20 +486,42 @@ const app = new Elysia()
   // ─── Scraper Trigger (ADMIN ONLY) ────────────
   .post('/api/scraper/run', async ({ request, set }) => {
     const adminKey = request.headers.get('x-admin-key');
-    if (adminKey !== ADMIN_KEY) {
+    if (!requireAdmin(adminKey)) {
       set.status = 403;
-      return { error: 'Forbidden. Admin key required.' };
+      return { error: 'Forbidden. Valid admin key required.' };
     }
     const countNews = await runNewsScraper();
     return { success: true, newsArticlesInserted: countNews };
   })
 
+  // ─── Enhanced News Scraper Trigger (ADMIN) ───
+  .post('/api/scraper/enhanced/run', async ({ request, set }) => {
+    const adminKey = request.headers.get('x-admin-key');
+    if (!requireAdmin(adminKey)) {
+      set.status = 403;
+      return { error: 'Forbidden. Valid admin key required.' };
+    }
+    const countNews = await runEnhancedNewsScraper();
+    return { success: true, newsArticlesInserted: countNews };
+  })
+
+  // ─── Multi-City MLA Scraper Trigger (ADMIN) ──
+  .post('/api/scraper/mla/multi-city/run', async ({ request, set }) => {
+    const adminKey = request.headers.get('x-admin-key');
+    if (!requireAdmin(adminKey)) {
+      set.status = 403;
+      return { error: 'Forbidden. Valid admin key required.' };
+    }
+    const countMlas = await runMultiCityMLAScraper();
+    return { success: true, mlasUpdated: countMlas };
+  })
+
   // ─── Project/MLA Scraper Trigger (ADMIN) ─────
   .post('/api/scraper/projects/run', async ({ request, set }) => {
     const adminKey = request.headers.get('x-admin-key');
-    if (adminKey !== ADMIN_KEY) {
+    if (!requireAdmin(adminKey)) {
       set.status = 403;
-      return { error: 'Forbidden. Admin key required.' };
+      return { error: 'Forbidden. Valid admin key required.' };
     }
     const countProjects = await runProjectScraper();
     return { success: true, projectsInserted: countProjects };
@@ -461,12 +530,54 @@ const app = new Elysia()
   // ─── MLA Scraper Trigger (ADMIN) ─────────────
   .post('/api/scraper/mla/run', async ({ request, set }) => {
     const adminKey = request.headers.get('x-admin-key');
-    if (adminKey !== ADMIN_KEY) {
+    if (!requireAdmin(adminKey)) {
       set.status = 403;
-      return { error: 'Forbidden. Admin key required.' };
+      return { error: 'Forbidden. Valid admin key required.' };
     }
     const countMlas = await runMlaScraper();
     return { success: true, mlasUpdated: countMlas };
+  })
+
+  // ─── Volunteer System: Submit Data ───────────
+  .post('/api/volunteer/submit', async ({ body, set }) => {
+    const { type, data, submittedBy, submitterEmail } = body as any;
+
+    if (!type || !data || !submittedBy) {
+      set.status = 400;
+      return { error: 'type, data, and submittedBy are required' };
+    }
+
+    try {
+      const result = await submitVolunteerData({ type, data, submittedBy, submitterEmail });
+      return { success: true, submissionId: result.id };
+    } catch (e) {
+      set.status = 500;
+      return { error: 'Submission failed' };
+    }
+  })
+
+  // ─── Volunteer System: Get Pending ────────────
+  .get('/api/volunteer/pending', async () => {
+    const pending = await getPendingSubmissions(50);
+    return { submissions: pending };
+  })
+
+  // ─── Volunteer System: Verify Submission ──────
+  .post('/api/volunteer/verify/:id', async ({ params, body, set }) => {
+    const { verifierId, approved, notes } = body as any;
+
+    if (!verifierId || typeof approved !== 'boolean') {
+      set.status = 400;
+      return { error: 'verifierId and approved (boolean) are required' };
+    }
+
+    try {
+      const result = await verifySubmission(params.id, verifierId, approved, notes);
+      return { success: true, ...result };
+    } catch (e) {
+      set.status = 500;
+      return { error: 'Verification failed' };
+    }
   })
 
   // ─── Clerk User Sync (auto-create on first login) ───
@@ -591,35 +702,47 @@ const app = new Elysia()
 
 console.log(`🟢 FixIndia.org API running at http://0.0.0.0:${app.server?.port}`);
 
-// ─── Cron: Run news scraper every 2 hours ───
-setInterval(async () => {
-  console.log('[Cron] Triggering news scrape...');
-  try {
-    await runNewsScraper();
-  } catch (e) {
-    console.error('[Cron] News Scraper failed:', e);
-  }
-}, 2 * 60 * 60 * 1000);
+// ═══════════════════════════════════════════════
+// SCHEDULED SCRAPING (OFF-PEAK HOURS: 3 AM - 8 AM IST)
+// ═══════════════════════════════════════════════
 
-// ─── Cron: Run project/MLA scraper every 24 hours ───
-setInterval(async () => {
-  console.log('[Cron] Triggering project intelligence scrape...');
+// ─── Enhanced News Scraper: 3 AM, 5 AM, 7 AM ───
+cron.schedule(SCRAPING_SCHEDULE.news.cron, async () => {
+  console.log(`[Cron] ${SCRAPING_SCHEDULE.news.description}`);
   try {
-    await runProjectScraper();
+    const count = await runEnhancedNewsScraper();
+    console.log(`[Cron] ✓ Enhanced news scraper: ${count} articles`);
   } catch (e) {
-    console.error('[Cron] Project Scraper failed:', e);
-  }
-}, 24 * 60 * 60 * 1000);
-
-// ─── Cron: Official MLA Wikipedia Scraper precisely at 3 AM daily ───
-cron.schedule('0 3 * * *', async () => {
-  console.log('[Cron] Executing 3 AM Bangalore civic MLA map sync...');
-  try {
-    await runMlaScraper();
-  } catch (e) {
-    console.error('[Cron] MLA Scraper failed:', e);
+    console.error('[Cron] Enhanced news scraper failed:', e);
   }
 });
+
+// ─── Multi-City MLA Scraper: 4 AM every Sunday ───
+cron.schedule(SCRAPING_SCHEDULE.mla.cron, async () => {
+  console.log(`[Cron] ${SCRAPING_SCHEDULE.mla.description}`);
+  try {
+    const count = await runMultiCityMLAScraper();
+    console.log(`[Cron] ✓ Multi-city MLA scraper: ${count} MLAs`);
+  } catch (e) {
+    console.error('[Cron] Multi-city MLA scraper failed:', e);
+  }
+});
+
+// ─── Government Projects: 6 AM every Monday ───
+cron.schedule(SCRAPING_SCHEDULE.government.cron, async () => {
+  console.log(`[Cron] ${SCRAPING_SCHEDULE.government.description}`);
+  try {
+    const count = await runProjectScraper();
+    console.log(`[Cron] ✓ Government projects scraper: ${count} projects`);
+  } catch (e) {
+    console.error('[Cron] Government projects scraper failed:', e);
+  }
+});
+
+console.log('📅 Scheduled scrapers configured:');
+console.log(`   - News: ${SCRAPING_SCHEDULE.news.cron} (3 AM, 5 AM, 7 AM IST)`);
+console.log(`   - MLAs: ${SCRAPING_SCHEDULE.mla.cron} (4 AM Sunday)`);
+console.log(`   - Projects: ${SCRAPING_SCHEDULE.government.cron} (6 AM Monday)`);
 
 // Helper: Smart relative time formatting
 function formatRelativeTime(date: string | Date): string {

@@ -24,17 +24,27 @@ export const storage = {
   async uploadImage(file: File): Promise<string> {
     if (!BUCKET) throw new Error("STORJ_BUCKET environment variable not set");
 
+    // Validate file size (10MB max)
+    const MAX_SIZE = 10 * 1024 * 1024;
     const buffer = Buffer.from(await file.arrayBuffer());
+
+    if (buffer.length > MAX_SIZE) {
+      throw new Error('Image too large. Maximum 10MB allowed.');
+    }
+
     const key = `reports/${Date.now()}-${Math.random().toString(36).substring(7)}.webp`;
 
     console.log(`📸 Processing image: ${file.name} (${(buffer.length / 1024).toFixed(2)} KB)`);
 
     // Compression pipeline: Resize to max 1200px width, convert to WebP with 80% quality
+    // Strip EXIF metadata for privacy
     const compressedBuffer = await sharp(buffer)
       .resize(1200, 1200, {
         fit: 'inside',
         withoutEnlargement: true
       })
+      .rotate() // Auto-rotate based on EXIF before stripping
+      .withMetadata(false) // Strip all EXIF data for privacy
       .webp({ quality: 80 })
       .toBuffer();
 
@@ -45,12 +55,17 @@ export const storage = {
       Key: key,
       Body: compressedBuffer,
       ContentType: "image/webp",
+      CacheControl: "public, max-age=31536000", // Cache for 1 year
+      ACL: "public-read", // Make images publicly accessible (no signed URLs needed)
     });
 
     try {
       await s3Client.send(command);
       console.log(`✅ Uploaded to Storj: ${key}`);
-      return key; // We store the key in the database
+
+      // Return public URL instead of key (no signed URLs needed)
+      const publicUrl = `${process.env.STORJ_ENDPOINT}/${BUCKET}/${key}`;
+      return publicUrl;
     } catch (error) {
       console.error("❌ Storj upload failed:", error);
       throw error;
@@ -58,25 +73,17 @@ export const storage = {
   },
 
   /**
-   * Generates a pre-signed URL for viewing a private file
-   * @param key The object key (from database)
-   * @returns A temporary signed URL (expires in 1 hour)
+   * Get public URL for an image (no signing needed with public-read ACL)
+   * @param keyOrUrl The object key or full URL from database
+   * @returns Public URL
    */
-  async getSignedUrl(key: string): Promise<string> {
-    if (!key) return "";
-    if (!BUCKET) throw new Error("STORJ_BUCKET not set");
+  getPublicUrl(keyOrUrl: string): string {
+    if (!keyOrUrl) return "";
 
-    const command = new GetObjectCommand({
-      Bucket: BUCKET,
-      Key: key,
-    });
+    // If already a full URL, return as-is
+    if (keyOrUrl.startsWith('http')) return keyOrUrl;
 
-    try {
-      // URL expires in 3600 seconds (1 hour)
-      return await getSignedUrl(s3Client, command, { expiresIn: 3600 });
-    } catch (error) {
-      console.error("❌ Failed to sign URL:", error);
-      return "";
-    }
+    // Otherwise construct public URL
+    return `${process.env.STORJ_ENDPOINT}/${BUCKET}/${keyOrUrl}`;
   }
 };

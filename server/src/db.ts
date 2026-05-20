@@ -6,9 +6,14 @@ if (!DATABASE_URL) {
 }
 
 const sql = postgres(DATABASE_URL, {
-  max: 10,
-  idle_timeout: 20,
+  max: 20, // Increased for better concurrency
+  idle_timeout: 300, // 5 minutes
   connect_timeout: 10,
+  max_lifetime: 3600, // Rotate connections hourly
+  onnotice: () => {}, // Suppress notices
+  transform: {
+    undefined: null, // Handle undefined gracefully
+  },
 });
 
 export default sql;

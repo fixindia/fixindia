@@ -83,35 +83,46 @@ function App() {
   };
 
   const handleReportSubmit = async (category: IssueCategory, customCategory: string | undefined, imageFile: File | null) => {
-    const lat = 12.9716 + (Math.random() - 0.5) * 0.05;
-    const lng = 77.5946 + (Math.random() - 0.5) * 0.05;
+    // Get real user location
+    if (!navigator.geolocation) {
+      alert('Geolocation is not supported by your browser. Please enable location services.');
+      return;
+    }
 
-    try {
-      const token = isSignedIn ? await getToken() : null;
-      await api.submitReport({
-        title: customCategory || category,
-        category,
-        customCategory,
-        latitude: lat,
-        longitude: lng,
-        severity: 'medium',
-        creatorId: user?.id,
-        image: imageFile || undefined
-      }, token);
-      const fresh = await api.getReports();
-      setIssues(fresh);
-    } catch {
-      const newIssue: Issue = {
-        id: `issue-${Date.now()}`,
-        latitude: lat,
-        longitude: lng,
-        title: customCategory || category,
-        category,
-        customCategory,
-        status: 'pending_verification',
-        severity: 'medium',
-        agency: 'Pending Assignment',
-        ward: 'Local Neighborhood',
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+
+        try {
+          const token = isSignedIn ? await getToken() : null;
+          await api.submitReport({
+            title: customCategory || category,
+            category,
+            customCategory,
+            latitude: lat,
+            longitude: lng,
+            severity: 'medium',
+            creatorId: user?.id,
+            image: imageFile || undefined
+          }, token);
+          const fresh = await api.getReports();
+          setIssues(fresh);
+        } catch (error) {
+          console.error('Report submission failed:', error);
+          alert('Failed to submit report. Please try again.');
+        }
+      },
+      (error) => {
+        console.error('Geolocation error:', error);
+        alert('Unable to get your location. Please enable location permissions and try again.');
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0
+      }
+    );
         mla: 'TBD',
         sanctionedBudget: 'Verification Required',
         upvotes: 0,
