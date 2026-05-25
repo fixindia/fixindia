@@ -143,6 +143,7 @@ function App() {
   const isVolunteerPortal = useMemo(() => {
     return window.location.hostname.startsWith('help.') || 
            window.location.hostname === 'help.fixindia.org' ||
+           window.location.pathname.startsWith('/volunteer') ||
            window.location.search.includes('portal=volunteer');
   }, []);
 
