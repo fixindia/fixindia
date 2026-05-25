@@ -34,6 +34,7 @@ export interface Issue {
   parliament?: string;
   mp?: string;
   imageUrl?: string;
+  sourceUrl?: string;
 }
 
 export interface UserStats {
@@ -59,3 +60,37 @@ export interface MlaStats {
   unresolvedCount: number;
   rank: number;
 }
+
+export interface VolunteerProfile {
+  id: string;
+  clerk_id: string;
+  display_name: string;
+  job_title?: string;
+  socials?: Record<string, string>;
+  avatar_url?: string;
+  email?: string;
+  role?: string;
+  home_state?: string;
+  home_city?: string;
+  home_constituency?: string;
+  reports_published?: number;
+  reports_verified?: number;
+  integrations_helped?: number;
+  civic_sense_score?: number;
+  created_at?: string;
+}
+
+export interface MLA {
+  id: number;
+  name: string;
+  party?: string;
+  constituency: string;
+  city: string;
+  state: string;
+  contact?: string;
+  email?: string;
+  is_incorrect?: boolean;
+  latitude?: number | string;
+  longitude?: number | string;
+}
+

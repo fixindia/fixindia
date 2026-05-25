@@ -114,7 +114,7 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
               <label className="flex-1 flex flex-col items-center justify-center cursor-pointer min-h-[300px] border-2 border-white/20 hover:border-white/50 border-dashed rounded-3xl bg-white/5 hover:bg-white/10 transition-all active:scale-[0.98] overflow-hidden">
                 <input type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
                 {previewUrl ? (
-                  <img src={previewUrl} title="Evidence Preview" className="w-full h-full object-cover" />
+                  <img src={previewUrl} alt="Evidence Preview" title="Evidence Preview" className="w-full h-full object-cover" />
                 ) : (
                   <>
                     <Camera size={48} strokeWidth={1.5} className="mb-4 text-white/50" />

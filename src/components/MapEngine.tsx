@@ -10,9 +10,46 @@ interface MapEngineProps {
   issues: Issue[];
   onMarkerTap: (issue: Issue) => void;
   activeIssueId?: string | null;
+  mlas?: any[];
+  onMlaMarkerTap?: (mla: any) => void;
+  activeMlaId?: number | null;
 }
 
-const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId }: MapEngineProps) {
+const CITY_COORDS: Record<string, [number, number]> = {
+  'bengaluru': [77.5946, 12.9716],
+  'bangalore': [77.5946, 12.9716],
+  'delhi': [77.2090, 28.6139],
+  'new delhi': [77.2090, 28.6139],
+  'mumbai': [72.8777, 19.0760],
+  'kolkata': [88.3639, 22.5726],
+  'chennai': [80.2707, 13.0827],
+  'hyderabad': [78.4867, 17.3850],
+  'pune': [73.8567, 18.5204],
+  'ahmedabad': [72.5714, 23.0225],
+};
+
+const getFallbackCoords = (city?: string, _state?: string, index: number = 0): [number, number] | null => {
+  const normCity = city?.toLowerCase().trim() || '';
+  if (CITY_COORDS[normCity]) {
+    const [lng, lat] = CITY_COORDS[normCity];
+    const angle = (index * 37) % 360;
+    const distance = 0.015 + (index * 0.003) % 0.02;
+    const rad = (angle * Math.PI) / 180;
+    return [
+      lng + Math.cos(rad) * distance,
+      lat + Math.sin(rad) * distance
+    ];
+  }
+  const angle = (index * 29) % 360;
+  const distance = 0.08 + (index * 0.015) % 0.12;
+  const rad = (angle * Math.PI) / 180;
+  return [
+    77.5946 + Math.cos(rad) * distance, // Default to staggering around Bengaluru area if no match
+    12.9716 + Math.sin(rad) * distance
+  ];
+};
+
+const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId, mlas, onMlaMarkerTap, activeMlaId }: MapEngineProps) {
   const mapRef = useRef<MapRef>(null);
   const [hasLocated, setHasLocated] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<{ x: number, y: number, feature: any } | null>(null);
@@ -204,6 +241,64 @@ const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId }
                     ${isActive ? 'scale-[2.5] z-50' : 'scale-100 group-hover:scale-[1.5]'}
                   `} 
                 />
+              </div>
+            </Marker>
+          );
+        })}
+
+        {mlas && mlas.map((mla, idx) => {
+          let lat = Number(mla.latitude);
+          let lng = Number(mla.longitude);
+          const hasCoords = lat && lng && Math.abs(lat) > 0.1 && Math.abs(lng) > 0.1;
+          
+          if (!hasCoords) {
+            const fallback = getFallbackCoords(mla.city, mla.state, idx);
+            if (fallback) {
+              lng = fallback[0];
+              lat = fallback[1];
+            } else {
+              return null;
+            }
+          }
+
+          const isIncorrect = mla.is_incorrect || !mla.contact || mla.contact === 'Unknown' || mla.name?.includes('TBD');
+          const markerBgColor = isIncorrect ? 'bg-red-600' : 'bg-emerald-600';
+          const markerBorderColor = isIncorrect ? 'border-red-300' : 'border-emerald-300';
+          const isActive = activeMlaId === mla.id;
+
+          return (
+            <Marker
+              key={`mla-${mla.id}`}
+              longitude={lng}
+              latitude={lat}
+              anchor="center"
+              onClick={(e) => {
+                e.originalEvent?.stopPropagation();
+                mapRef.current?.flyTo({
+                  center: [lng, lat],
+                  zoom: 15.5,
+                  duration: 1000,
+                  offset: [0, -100]
+                });
+                if (onMlaMarkerTap) onMlaMarkerTap(mla);
+              }}
+            >
+              <div className="relative flex items-center justify-center p-3 cursor-pointer group">
+                <div 
+                  className={`
+                    w-6 h-6 rounded-full border-2 border-white/90 flex items-center justify-center text-[11px] font-black text-white shadow-[0_4px_12px_rgba(0,0,0,0.5)]
+                    ${markerBgColor} ${markerBorderColor}
+                    transition-all duration-300
+                    ${isIncorrect ? 'animate-[pulse_1.5s_infinite]' : ''}
+                    ${isActive ? 'scale-[2.2] z-50 ring-4 ring-white/60' : 'scale-100 group-hover:scale-[1.3]'}
+                  `} 
+                >
+                  {isIncorrect ? '!' : '✓'}
+                </div>
+                
+                {isIncorrect && (
+                  <div className="absolute inset-0 rounded-full bg-red-600/30 scale-[1.7] animate-ping pointer-events-none" />
+                )}
               </div>
             </Marker>
           );

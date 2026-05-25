@@ -121,29 +121,88 @@ export const api = {
   async updateUserByClerkId(clerkId: string, profile: {
     jobTitle?: string;
     socials?: Record<string, string>;
-  }) {
+    homeConstituency?: string;
+    homeCity?: string;
+    homeState?: string;
+  }, token?: string | null) {
     const res = await fetch(`${API_BASE}/api/users/clerk/${clerkId}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(token || null),
       body: JSON.stringify(profile),
     });
     return res.json();
   },
 
-  async createUser(profile: { displayName?: string; jobTitle?: string; socials?: Record<string, string> }) {
+  async flagMLA(mlaId: number, token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/mlas/${mlaId}/flag`, {
+      method: 'POST',
+      headers: authHeaders(token || null),
+    });
+    return res.json();
+  },
+
+  async flagMLAByName(name: string, constituency?: string, token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/mlas/flag-by-name`, {
+      method: 'POST',
+      headers: authHeaders(token || null),
+      body: JSON.stringify({ name, constituency }),
+    });
+    return res.json();
+  },
+
+  async getMLAs() {
+    const res = await fetch(`${API_BASE}/api/mlas`);
+    const data = await res.json();
+    return data.mlas || [];
+  },
+
+  async getVolunteersByConstituency(constituency: string) {
+    const res = await fetch(`${API_BASE}/api/users/volunteers/constituency/${constituency}`);
+    const data = await res.json();
+    return data.volunteers || [];
+  },
+
+  async submitVolunteerData(type: string, data: Record<string, unknown>, submittedBy: string, submitterEmail?: string | null, token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/volunteer/submit`, {
+      method: 'POST',
+      headers: authHeaders(token || null),
+      body: JSON.stringify({ type, data, submittedBy, submitterEmail }),
+    });
+    return res.json();
+  },
+
+  async createUser(profile: { displayName?: string; jobTitle?: string; socials?: Record<string, string> }, token?: string | null) {
     const res = await fetch(`${API_BASE}/api/users`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(token || null),
       body: JSON.stringify(profile),
     });
     return res.json();
   },
 
-  async updateUser(userId: string, profile: { displayName?: string; jobTitle?: string; socials?: Record<string, string>; avatarUrl?: string }) {
+  async updateUser(userId: string, profile: { displayName?: string; jobTitle?: string; socials?: Record<string, string>; avatarUrl?: string }, token?: string | null) {
     const res = await fetch(`${API_BASE}/api/users/${userId}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(token || null),
       body: JSON.stringify(profile),
+    });
+    return res.json();
+  },
+
+  // ─── Volunteer System ────────────────────────
+  async getVolunteerPending(token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/volunteer/pending`, {
+      headers: authHeaders(token || null),
+    });
+    const data = await res.json();
+    return data.submissions || [];
+  },
+
+  async verifyVolunteerSubmission(id: string, approved: boolean, verifierId: string, notes?: string, token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/volunteer/verify/${id}`, {
+      method: 'POST',
+      headers: authHeaders(token || null),
+      body: JSON.stringify({ verifierId, approved, notes }),
     });
     return res.json();
   },

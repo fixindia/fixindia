@@ -63,7 +63,7 @@ export async function runProjectScraper(): Promise<number> {
         if (!item.link) continue;
         
         // Deduplication
-        const existingByUrl = await sql`SELECT id FROM reports WHERE image_url = ${item.link} LIMIT 1`;
+        const existingByUrl = await sql`SELECT id FROM reports WHERE source_url = ${item.link} LIMIT 1`;
         if (existingByUrl.length > 0) continue;
 
         const textToAnalyze = `Title: ${item.title}\nDescription: ${item.contentSnippet || item.content || ''}`;
@@ -115,7 +115,7 @@ export async function runProjectScraper(): Promise<number> {
           INSERT INTO reports (
             title, category, location, status, severity, 
             agency, ward_name, mla_name, sanctioned_budget, 
-            upvotes, verification_count, image_url, created_at
+            upvotes, verification_count, image_url, source_url, created_at
           )
           VALUES (
             ${parsed.title.slice(0, 80)}, 
@@ -129,6 +129,7 @@ export async function runProjectScraper(): Promise<number> {
             ${parsed.budget || 'Pending'},
             ${Math.floor(Math.random() * 50) + 10}, 
             ${Math.floor(Math.random() * 3) + 1}, 
+            null,
             ${item.link},
             NOW()
           )

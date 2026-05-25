@@ -1,7 +1,11 @@
 # System files
 .DS_Store
 *.log
-
+.agent/
+.claude/
+.ai/
+.github/
+.wrangler/
 # SSH keys and credentials
 SSH/
 *.key

@@ -18,8 +18,16 @@ export function validateEnv() {
   const missing: string[] = [];
   const warnings: string[] = [];
 
+  // Clerk secret key is required in production, recommended/optional in development
+  const actualRequired = [...requiredEnvVars];
+  if (process.env.NODE_ENV === 'production') {
+    actualRequired.push('CLERK_SECRET_KEY');
+  } else if (!process.env.CLERK_SECRET_KEY) {
+    warnings.push('CLERK_SECRET_KEY');
+  }
+
   // Check required variables
-  for (const varName of requiredEnvVars) {
+  for (const varName of actualRequired) {
     if (!process.env[varName]) {
       missing.push(varName);
     }

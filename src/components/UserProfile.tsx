@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useUser, useClerk } from '@clerk/react';
+import { useUser, useClerk, useAuth } from '../lib/auth-provider';
 import { User, X, CheckCircle, Shield, Award, MapPin, Camera, Briefcase, Link2, AtSign, Edit2, Save, LogOut } from 'lucide-react';
 import { api } from '../lib/api';
 
@@ -13,6 +13,7 @@ interface UserProfileProps {
 
 export default function UserProfile({ isOpen, onClose, onReportClick, onMyIssuesClick }: UserProfileProps) {
   const { user } = useUser();
+  const { getToken } = useAuth();
   const { signOut } = useClerk();
   
   const [isEditing, setIsEditing] = useState(false);
@@ -47,10 +48,11 @@ export default function UserProfile({ isOpen, onClose, onReportClick, onMyIssues
   const handleSave = async () => {
     if (!user) return;
     try {
+      const token = await getToken();
       await api.updateUserByClerkId(user.id, {
         jobTitle,
         socials,
-      });
+      }, token);
     } catch (e) {
       console.warn('Profile save failed:', e);
     }

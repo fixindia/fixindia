@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS users (
   reports_verified INTEGER DEFAULT 0,
   integrations_helped INTEGER DEFAULT 0,
   trust_score INTEGER DEFAULT 0,
+  home_constituency TEXT,
+  home_city TEXT,
+  home_state TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -57,6 +60,7 @@ CREATE TABLE IF NOT EXISTS reports (
   verification_count INTEGER DEFAULT 0,
   creator_id TEXT,
   image_url TEXT,
+  source_url TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -86,6 +90,9 @@ CREATE TABLE IF NOT EXISTS mlas (
   state TEXT NOT NULL,
   contact TEXT,
   email TEXT,
+  is_incorrect BOOLEAN DEFAULT FALSE,
+  latitude NUMERIC(9,6),
+  longitude NUMERIC(9,6),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(name, constituency)
@@ -178,3 +185,22 @@ CREATE INDEX IF NOT EXISTS idx_news_city ON local_news(city) WHERE city IS NOT N
 CREATE INDEX IF NOT EXISTS idx_pending_verifications_status ON pending_verifications(status);
 CREATE INDEX IF NOT EXISTS idx_pending_verifications_type ON pending_verifications(data_type);
 CREATE INDEX IF NOT EXISTS idx_volunteer_verifications_submission ON volunteer_verifications(submission_id);
+
+-- ─── AI Models Configuration Table ──────────────
+CREATE TABLE IF NOT EXISTS ai_models (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  provider TEXT NOT NULL CHECK (provider IN ('Groq', 'OpenRouter', 'OpenAI', 'Gemini', 'Anthropic')),
+  model_string TEXT NOT NULL,
+  api_key TEXT,
+  api_key_env_var TEXT NOT NULL,
+  api_endpoint TEXT,
+  priority INTEGER NOT NULL DEFAULT 1,
+  is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  is_free BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_models_priority ON ai_models(priority) WHERE is_enabled = TRUE;
+

@@ -1,8 +1,25 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
-import { motion, useDragControls } from 'framer-motion';
+import { useState } from 'react';
+import { motion, useDragControls, type PanInfo } from 'framer-motion';
 import type { Issue } from '../types';
 import Leaderboard from './Leaderboard';
-import { MapPin, TrendingUp, ChevronUp, Newspaper } from 'lucide-react';
+import { MapPin, TrendingUp, ChevronUp, Newspaper, AlertTriangle } from 'lucide-react';
+import { api } from '../lib/api';
+import { useAuth } from '../lib/auth-provider';
+
+const getVolunteerPortalUrl = (mlaName: string, constituency?: string) => {
+  const params = new URLSearchParams({
+    action: 'correct',
+    mla_name: mlaName,
+    constituency: constituency || '',
+  });
+
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    params.set('portal', 'volunteer');
+    return `/?${params.toString()}`;
+  } else {
+    return `https://help.fixindia.org/?${params.toString()}`;
+  }
+};
 
 interface BottomSheetProps {
   sheetState: 'rest' | 'half' | 'full';
@@ -15,6 +32,27 @@ interface BottomSheetProps {
 
 export default function BottomSheet({ sheetState, setSheetState, activeIssue, onReportClick, onUnselectIssue, issuesCount }: BottomSheetProps) {
   const dragControls = useDragControls();
+  const [flagging, setFlagging] = useState(false);
+  const [flagged, setFlagged] = useState(false);
+  const { getToken } = useAuth();
+
+  const handleFlagMla = async () => {
+    if (!activeIssue || !activeIssue.mla) return;
+    setFlagging(true);
+    try {
+      const token = await getToken();
+      await api.flagMLAByName(activeIssue.mla, activeIssue.parliament || undefined, token);
+      setFlagged(true);
+      setTimeout(() => {
+        const targetUrl = getVolunteerPortalUrl(activeIssue.mla, activeIssue.parliament || undefined);
+        window.location.href = targetUrl;
+      }, 1500);
+    } catch (e) {
+      console.error('Failed to flag MLA:', e);
+      alert('Failed to flag details. Please try again.');
+      setFlagging(false);
+    }
+  };
   
   const variants = {
     rest: { top: '85%' },
@@ -22,7 +60,7 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
     full: { top: '10%' }
   };
 
-  const handleDragEnd = (_: any, info: any) => {
+  const handleDragEnd = (_event: unknown, info: PanInfo) => {
     const velocity = info.velocity.y;
     const offset = info.offset.y;
 
@@ -100,19 +138,31 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
           >
             {activeIssue ? (
               <>
-                {activeIssue.imageUrl && (
-                  <div className="w-full h-48 rounded-2xl overflow-hidden mb-2 mt-1 relative group">
-                    <img 
-                      src={activeIssue.imageUrl} 
-                      alt={activeIssue.title} 
-                      className="w-full h-full object-cover"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
-                    <div className="absolute bottom-3 left-3 text-[10px] uppercase font-bold tracking-widest text-white/70">
-                      Evidence from Storj Media
+                {activeIssue.imageUrl && (() => {
+                  const hasValidImageExtension = (url?: string) => {
+                    if (!url) return false;
+                    try {
+                      const pathname = new URL(url).pathname;
+                      return /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(pathname);
+                    } catch {
+                      return /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(url);
+                    }
+                  };
+                  if (!hasValidImageExtension(activeIssue.imageUrl)) return null;
+                  return (
+                    <div className="w-full h-48 rounded-2xl overflow-hidden mb-2 mt-1 relative group">
+                      <img 
+                        src={activeIssue.imageUrl} 
+                        alt={activeIssue.title} 
+                        className="w-full h-full object-cover"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
+                      <div className="absolute bottom-3 left-3 text-[10px] uppercase font-bold tracking-widest text-white/70">
+                        Evidence from Storj Media
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
                 <button 
                   onClick={onUnselectIssue}
                   className="w-fit bg-transparent hover:bg-white/10 border border-white/20 px-4 py-2 rounded-full text-xs font-bold flex items-center justify-center transition-all text-white/70 hover:text-white shrink-0 self-start mb-1"
@@ -133,10 +183,28 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 mt-4">
-                  <div className="bg-white/5 p-4 rounded-2xl border border-white/5 flex flex-col justify-center">
+                  <div className="bg-white/5 p-4 rounded-2xl border border-white/5 flex flex-col justify-center relative group/mla">
                     <span className="text-white/40 text-[10px] uppercase tracking-wider block mb-1 font-bold">Accountable MLA</span>
-                    <span className="font-bold text-sm">{activeIssue.mla}</span>
+                    <span className="font-bold text-sm pr-12">{activeIssue.mla}</span>
                     {activeIssue.parliament && <span className="text-[9px] text-white/30 font-medium mt-1">Assembly: {activeIssue.parliament}</span>}
+                    
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleFlagMla();
+                      }}
+                      disabled={flagging || flagged}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center justify-center p-2 rounded-lg bg-red-600/10 border border-red-500/20 text-red-400 hover:bg-red-600/20 disabled:opacity-80 transition-all hover:scale-105 duration-200"
+                      title="Flag Details as Incorrect"
+                    >
+                      {flagged ? (
+                        <span className="text-[10px] text-red-500 font-bold animate-pulse">Flagged!</span>
+                      ) : flagging ? (
+                        <span className="text-[10px] text-white/50 animate-pulse">Wait...</span>
+                      ) : (
+                        <AlertTriangle size={14} className="animate-pulse" />
+                      )}
+                    </button>
                   </div>
                   <div className="bg-white/5 p-4 rounded-2xl border border-white/5 flex flex-col justify-center">
                     <span className="text-white/40 text-[10px] uppercase tracking-wider block mb-1 font-bold">Accountable MP</span>
@@ -195,6 +263,18 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
                     <TrendingUp size={18} className="text-[#FFBF00]" />
                     Still Broken (+1 Upvote)
                   </button>
+                )}
+
+                {activeIssue.sourceUrl && (
+                  <a 
+                    href={activeIssue.sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full mt-2 bg-gradient-to-r from-[#00D1FF]/10 to-[#00D1FF]/20 hover:from-[#00D1FF]/20 hover:to-[#00D1FF]/30 border border-[#00D1FF]/30 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all text-[#00D1FF] text-center"
+                  >
+                    <Newspaper size={18} />
+                    Read Source Article
+                  </a>
                 )}
               </>
             ) : (

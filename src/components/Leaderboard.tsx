@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { Trophy, AlertTriangle, Award, Link2, AtSign, Briefcase, Info } from 'lucide-react';
 import { api } from '../lib/api';
 import type { UserStats, MlaStats } from '../types';
+import { getVolunteerLevel } from '../lib/levels';
+
 
 export default function Leaderboard() {
   const [activeTab, setActiveTab] = useState<'shame' | 'fame'>('shame');
@@ -81,12 +83,17 @@ export default function Leaderboard() {
                 </div>
                 
                 <div className="flex-1">
-                  <h3 className={`font-bold text-lg flex items-center gap-2 ${idx === 0 ? 'text-[#FFD700]' : ''}`}>
-                    {citizen.name}
-                    {idx === 0 && <Award size={16} className="text-[#FFD700]" />}
-                  </h3>
+                  <div className="flex items-center flex-wrap gap-2">
+                    <h3 className={`font-bold text-lg flex items-center gap-2 ${idx === 0 ? 'text-[#FFD700]' : ''}`}>
+                      {citizen.name}
+                      {idx === 0 && <Award size={16} className="text-[#FFD700]" />}
+                    </h3>
+                    <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border shrink-0 ${getVolunteerLevel(citizen.civicSenseScore).color}`}>
+                      {getVolunteerLevel(citizen.civicSenseScore).name}
+                    </span>
+                  </div>
                   {citizen.jobTitle && (
-                    <p className="text-white/50 text-xs font-medium tracking-wide">{citizen.jobTitle}</p>
+                    <p className="text-white/50 text-xs font-medium tracking-wide mt-0.5">{citizen.jobTitle}</p>
                   )}
                   {citizen.socials && (
                     <div className="flex items-center gap-2 mt-2">
@@ -124,8 +131,8 @@ export default function Leaderboard() {
               <strong>How to get points:</strong>
               <ul className="list-disc pl-4 opacity-90 space-y-1 mt-1 text-xs">
                 <li><strong>+10 points</strong> for reporting a problem</li>
-                <li><strong>+20 points</strong> for checking if a problem is real</li>
-                <li><strong>+50 points</strong> for helping improve the app</li>
+                <li><strong>+20 points</strong> for verification votes / queue audits</li>
+                <li><strong>+50 points</strong> for submitted corrections approved & published</li>
               </ul>
             </div>
           </div>

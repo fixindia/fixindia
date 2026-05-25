@@ -42,18 +42,22 @@ fi
 # Start or restart the application
 echo "🔄 Restarting application..."
 pm2 delete fixindia-api 2>/dev/null || true
+pm2 delete fixindia-admin-api 2>/dev/null || true
 pm2 start ecosystem.config.json
 pm2 save
 
 # Health check
 echo "🏥 Running health check..."
 sleep 3
-if curl -f http://localhost:4000/health > /dev/null 2>&1; then
+if curl -f http://localhost:6969/health > /dev/null 2>&1 && curl -f http://localhost:6970/health > /dev/null 2>&1; then
   echo -e "${GREEN}✅ Deployment successful!${NC}"
   pm2 status
 else
   echo -e "${RED}❌ Health check failed!${NC}"
-  pm2 logs fixindia-api --lines 50
+  echo "--- Public API logs ---"
+  pm2 logs fixindia-api --lines 20 --no-colors || true
+  echo "--- Admin API logs ---"
+  pm2 logs fixindia-admin-api --lines 20 --no-colors || true
   exit 1
 fi
 

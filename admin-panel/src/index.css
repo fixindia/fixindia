@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    background-color: #0b0f19;
+    color: #f3f4f6;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #10b981;
+}
+
+/* Glassmorphism utility class */
+.glass {
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* CSS Anchor Positioning rules for Process Monitor tooltips */
+@supports (anchor-name: --test) {
+  .anchor-trigger-0 { anchor-name: --anchor-0; }
+  .anchor-trigger-1 { anchor-name: --anchor-1; }
+  
+  .anchor-popover-0 {
+    position: absolute;
+    position-anchor: --anchor-0;
+    top: anchor(bottom);
+    left: anchor(left);
+    margin-top: 8px;
+    margin-left: -20px;
+  }
+  .anchor-popover-1 {
+    position: absolute;
+    position-anchor: --anchor-1;
+    top: anchor(bottom);
+    left: anchor(left);
+    margin-top: 8px;
+    margin-left: -20px;
+  }
+}
+
+/* Fallback if CSS Anchor Positioning is not supported */
+@supports not (anchor-name: --test) {
+  .anchor-popover-0, .anchor-popover-1 {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 50;
+    margin-top: 8px;
+  }
+}
+

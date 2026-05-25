@@ -1,22 +1,73 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
 import { Elysia, t } from 'elysia';
 import { cors } from '@elysiajs/cors';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, createHash } from 'node:crypto';
 import sql from './db';
 import { storage } from './lib/storage';
-import { runNewsScraper } from './scraper';
 import { runProjectScraper } from './project_scraper';
-import { runMlaScraper } from './mla_scraper';
 import { runEnhancedNewsScraper } from './enhanced_scraper';
 import { runMultiCityMLAScraper } from './multi_city_mla_scraper';
 import { submitVolunteerData, getPendingSubmissions, verifySubmission } from './volunteer_system';
-import { securityHeaders, generateFingerprint, checkRateLimit, detectSQLInjection, detectXSS, sanitizeInput } from './security';
+import { securityHeaders, generateFingerprint, checkRateLimit, checkUserRateLimit, sanitizeInput, sanitizeTitle, validateImageMagicBytes } from './security';
+import { verifyAuth, requireAuth, requireOwnership } from './auth';
 import cron from 'node-cron';
 import { validateEnv } from './config';
 import { SCRAPING_SCHEDULE } from './config/cities';
 
 // Validate environment variables on startup
 validateEnv();
+
+// Run database migrations on startup
+try {
+  console.log('🔄 Running database migrations...');
+  await sql`
+    ALTER TABLE mlas 
+    ADD COLUMN IF NOT EXISTS is_incorrect BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS latitude NUMERIC(9,6),
+    ADD COLUMN IF NOT EXISTS longitude NUMERIC(9,6)
+  `;
+  await sql`
+    ALTER TABLE users 
+    ADD COLUMN IF NOT EXISTS home_constituency TEXT,
+    ADD COLUMN IF NOT EXISTS home_city TEXT,
+    ADD COLUMN IF NOT EXISTS home_state TEXT
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS ai_models (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      provider TEXT NOT NULL CHECK (provider IN ('Groq', 'OpenRouter', 'OpenAI', 'Gemini', 'Anthropic')),
+      model_string TEXT NOT NULL,
+      api_key TEXT,
+      api_key_env_var TEXT NOT NULL,
+      api_endpoint TEXT,
+      priority INTEGER NOT NULL DEFAULT 1,
+      is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      is_free BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_ai_models_priority ON ai_models(priority) WHERE is_enabled = TRUE
+  `;
+
+  // Seed default models if table is empty
+  const countRes = await sql`SELECT COUNT(*)::integer FROM ai_models`;
+  if (countRes[0] && countRes[0].count === 0) {
+    await sql`
+      INSERT INTO ai_models (name, provider, model_string, api_key_env_var, api_endpoint, priority, is_enabled, is_free)
+      VALUES 
+        ('Groq Llama 3.3 70B', 'Groq', 'llama-3.3-70b-versatile', 'GROQ_API_KEYS', 'https://api.groq.com/openai/v1/chat/completions', 1, TRUE, TRUE),
+        ('OpenRouter Llama 3.3 70B', 'OpenRouter', 'meta-llama/llama-3.3-70b-instruct:free', 'OPENROUTER_API_KEYS', 'https://openrouter.ai/api/v1/chat/completions', 2, TRUE, TRUE),
+        ('OpenRouter Gemini 2.5 Flash', 'OpenRouter', 'google/gemini-2.5-flash:free', 'OPENROUTER_API_KEYS', 'https://openrouter.ai/api/v1/chat/completions', 3, TRUE, TRUE)
+    `;
+    console.log('✓ Seeded default AI models.');
+  }
+  console.log('✓ Database migrations complete.');
+} catch (err) {
+  console.error('❌ Database migration failed:', err);
+}
 
 // ─── Security: In-memory rate limiter ──────────
 // Now using enhanced fingerprinting from security.ts
@@ -34,13 +85,11 @@ if (!ADMIN_KEY) {
 function constantTimeCompare(a: string, b: string): boolean {
   if (!a || !b) return false;
   
-  // Hash the strings first to prevent length-extension attacks
-  // and handle unequal lengths securely
-  const aBuf = Buffer.from(a);
-  const bBuf = Buffer.from(b);
-  
-  if (aBuf.length !== bBuf.length) return false;
-  return timingSafeEqual(aBuf, bBuf);
+  // SECURITY: Hash inputs first to normalize lengths and prevent
+  // length-based timing side-channels
+  const aHash = createHash('sha256').update(a).digest();
+  const bHash = createHash('sha256').update(b).digest();
+  return timingSafeEqual(aHash, bHash);
 }
 
 // Admin authentication middleware
@@ -51,9 +100,8 @@ function requireAdmin(adminKey: string | null): boolean {
 }
 
 // Allowed frontend origins (strict matching)
-const ALLOWED_ORIGINS = [
-  'http://localhost:3000',
-  'http://localhost:5173',
+// SECURITY: Only include localhost origins in development mode
+const PROD_ORIGINS = [
   'https://fixindia.org',
   'https://www.fixindia.org',
   'https://fixindia.pages.dev',
@@ -61,7 +109,22 @@ const ALLOWED_ORIGINS = [
   'https://builder.fixindia.org',
 ];
 
-const app = new Elysia()
+const DEV_ORIGINS = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://help.localhost:5173',
+];
+
+const ALLOWED_ORIGINS = process.env.NODE_ENV === 'production'
+  ? PROD_ORIGINS
+  : [...PROD_ORIGINS, ...DEV_ORIGINS];
+
+const app = new Elysia({
+  serve: {
+    // Limit request body to 15MB (10MB image + metadata headroom)
+    maxRequestBodySize: 1024 * 1024 * 15,
+  }
+})
   .use(cors({
     origin: ALLOWED_ORIGINS,
     methods: ['GET', 'POST', 'PUT'],
@@ -74,6 +137,7 @@ const app = new Elysia()
     Object.entries(securityHeaders).forEach(([key, value]) => {
       set.headers[key] = value;
     });
+    // Note: Vary: Origin is automatically set by @elysiajs/cors middleware
   })
 
   // ─── Enhanced Rate Limiting with Fingerprinting ───
@@ -121,7 +185,7 @@ const app = new Elysia()
         ST_X(location::geometry) as longitude,
         created_at, creator_id,
         zone, parliamentary_constituency, mp_name,
-        image_url
+        image_url, source_url
       FROM reports
       WHERE ST_Intersects(
         location,
@@ -191,6 +255,7 @@ const app = new Elysia()
         parliament: r.parliamentary_constituency,
         mp: r.mp_name,
         imageUrl: imageUrl,
+        sourceUrl: r.source_url,
       };
     }));
 
@@ -208,7 +273,7 @@ const app = new Elysia()
         ST_X(location::geometry) as longitude,
         created_at, creator_id,
         zone, parliamentary_constituency, mp_name,
-        image_url
+        image_url, source_url
       FROM reports
       WHERE status != 'pending_verification'
       ORDER BY created_at DESC
@@ -239,6 +304,7 @@ const app = new Elysia()
         parliament: r.parliamentary_constituency,
         mp: r.mp_name,
         imageUrl: imageUrl,
+        sourceUrl: r.source_url,
       };
     }));
 
@@ -246,19 +312,22 @@ const app = new Elysia()
   })
 
   // ─── Submit Report (validated) ────────────────
-  .post('/api/reports', async ({ body, set }) => {
-    const { title, category, customCategory, latitude, longitude, severity, creatorId, image } = body as any;
-
-    // Security: Detect SQL injection attempts
-    if (title && detectSQLInjection(title)) {
-      set.status = 400;
-      return { error: 'Invalid input detected' };
+  .post('/api/reports', async ({ body, set, request }) => {
+    // Auth: Require authenticated user for report submission
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to submit reports' };
     }
 
-    // Security: Detect XSS attempts
-    if (title && detectXSS(title)) {
-      set.status = 400;
-      return { error: 'Invalid input detected' };
+    const { title, category, customCategory, latitude, longitude, severity, creatorId, image } = body;
+
+    // Per-user rate limit: max 5 reports per 10 minutes
+    if (auth.userId) {
+      const userLimit = checkUserRateLimit(auth.userId, 'submit_report', 5, 10 * 60 * 1000);
+      if (!userLimit.allowed) {
+        set.status = 429;
+        return { error: 'Too many reports. Please wait before submitting again.', retryAfter: userLimit.retryAfter };
+      }
     }
 
     let imageUrl = null;
@@ -270,11 +339,18 @@ const app = new Elysia()
         return { error: 'Image too large. Maximum 10MB allowed.' };
       }
 
-      // Validate image type
+      // Validate image type via MIME
       const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
       if (!allowedTypes.includes(image.type)) {
         set.status = 400;
         return { error: 'Invalid image type. Only JPEG, PNG, and WebP allowed.' };
+      }
+
+      // Validate magic bytes match declared type
+      const imageBuffer = Buffer.from(await image.arrayBuffer());
+      if (!validateImageMagicBytes(imageBuffer, image.type)) {
+        set.status = 400;
+        return { error: 'Image content does not match declared type.' };
       }
 
       try {
@@ -306,8 +382,8 @@ const app = new Elysia()
     }
 
     const validSeverity = ['low', 'medium', 'high', 'critical'];
-    const safeSeverity = validSeverity.includes(severity) ? severity : 'medium';
-    const safeTitle = title.replace(/<[^>]*>/g, '').trim(); // Strip HTML
+    const safeSeverity = validSeverity.includes(severity || '') ? severity : 'medium';
+    const safeTitle = sanitizeTitle(title);
 
     const wardMatch = await sql`
       SELECT ward_name, mla_name, sanctioned_budget::text
@@ -358,12 +434,37 @@ const app = new Elysia()
     }
 
     return { success: true, report };
+  }, {
+    body: t.Object({
+      title: t.String({ minLength: 3, maxLength: 200 }),
+      category: t.String({ minLength: 1, maxLength: 50 }),
+      customCategory: t.Optional(t.Union([t.String({ maxLength: 100 }), t.Null()])),
+      latitude: t.Numeric({ minimum: -90, maximum: 90 }),
+      longitude: t.Numeric({ minimum: -180, maximum: 180 }),
+      severity: t.Optional(t.Union([t.Literal('low'), t.Literal('medium'), t.Literal('high'), t.Literal('critical')])),
+      creatorId: t.Optional(t.Union([t.String(), t.Null()])),
+      image: t.Optional(t.Any()),
+    })
   })
 
   // ─── Upvote (one per user) ───────────────────
-  .post('/api/reports/:id/upvote', async ({ params, body, set }) => {
-    const { userId } = body as any;
-    if (!userId) { set.status = 400; return { error: 'userId required' }; }
+  .post('/api/reports/:id/upvote', async ({ params, body, set, request }) => {
+    // Auth: Require authenticated user
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to upvote' };
+    }
+
+    const { userId } = body;
+
+    // Per-user rate limit: max 30 upvotes per 10 minutes
+    if (auth.userId) {
+      const userLimit = checkUserRateLimit(auth.userId, 'upvote', 30, 10 * 60 * 1000);
+      if (!userLimit.allowed) {
+        set.status = 429;
+        return { error: 'Too many upvotes. Slow down.', retryAfter: userLimit.retryAfter };
+      }
+    }
 
     try {
       await sql`INSERT INTO upvotes (report_id, user_id) VALUES (${params.id}, ${userId})`;
@@ -373,14 +474,32 @@ const app = new Elysia()
       set.status = 409;
       return { success: false, error: 'Already upvoted' };
     }
+  }, {
+    params: t.Object({
+      id: t.String()
+    }),
+    body: t.Object({
+      userId: t.String()
+    })
   })
 
   // ─── Verify Report ───────────────────────────
-  .post('/api/reports/:id/verify', async ({ params, body, set }) => {
-    const { userId, isValid } = body as any;
-    if (!userId || typeof isValid !== 'boolean') {
-      set.status = 400;
-      return { error: 'userId and isValid (boolean) required' };
+  .post('/api/reports/:id/verify', async ({ params, body, set, request }) => {
+    // Auth: Require authenticated user
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to verify reports' };
+    }
+
+    const { userId, isValid } = body;
+
+    // Per-user rate limit: max 20 verifications per 10 minutes
+    if (auth.userId) {
+      const userLimit = checkUserRateLimit(auth.userId, 'verify_report', 20, 10 * 60 * 1000);
+      if (!userLimit.allowed) {
+        set.status = 429;
+        return { error: 'Too many verifications. Slow down.', retryAfter: userLimit.retryAfter };
+      }
     }
 
     try {
@@ -405,6 +524,14 @@ const app = new Elysia()
       set.status = 409;
       return { success: false, error: 'Already verified' };
     }
+  }, {
+    params: t.Object({
+      id: t.String()
+    }),
+    body: t.Object({
+      userId: t.String(),
+      isValid: t.Boolean()
+    })
   })
 
   // ─── Leaderboard: Citizens ───────────────────
@@ -532,22 +659,95 @@ const app = new Elysia()
   // ─── MLAs ────────────────────────────────────
   .get('/api/mlas', async () => {
     const mlas = await sql`
-      SELECT id, name, party, constituency, city, state, contact, email
+      SELECT id, name, party, constituency, city, state, contact, email, is_incorrect, latitude, longitude
       FROM mlas
       ORDER BY city, name
     `;
     return { mlas };
   })
 
-  // ─── Scraper Trigger (ADMIN ONLY) ────────────
-  .post('/api/scraper/run', async ({ request, set }) => {
-    const adminKey = request.headers.get('x-admin-key');
-    if (!requireAdmin(adminKey)) {
-      set.status = 403;
-      return { error: 'Forbidden. Valid admin key required.' };
+  .post('/api/mlas/:id/flag', async ({ params, set, request }) => {
+    // Auth: Require authenticated user to flag MLAs
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to flag MLA details' };
     }
-    const countNews = await runNewsScraper();
-    return { success: true, newsArticlesInserted: countNews };
+
+    const { id } = params;
+    const [mla] = await sql`
+      SELECT id, is_incorrect FROM mlas WHERE id = ${id}
+    `;
+    if (!mla) {
+      set.status = 404;
+      return { error: 'MLA not found' };
+    }
+    await sql`
+      UPDATE mlas
+      SET is_incorrect = TRUE, updated_at = NOW()
+      WHERE id = ${id}
+    `;
+    return { success: true, message: 'MLA details flagged as incorrect' };
+  })
+
+  .post('/api/mlas/flag-by-name', async ({ body, set, request }) => {
+    // Auth: Require authenticated user
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to flag MLA details' };
+    }
+
+    const { name, constituency } = body as any;
+    if (!name) {
+      set.status = 400;
+      return { error: 'MLA name is required' };
+    }
+    
+    let mla;
+    if (constituency) {
+      [mla] = await sql`
+        SELECT id FROM mlas WHERE name = ${name} AND constituency = ${constituency}
+      `;
+    } else {
+      [mla] = await sql`
+        SELECT id FROM mlas WHERE name = ${name} LIMIT 1
+      `;
+    }
+    
+    if (!mla) {
+      // Create placeholder MLA
+      const [newMla] = await sql`
+        INSERT INTO mlas (name, constituency, city, state, is_incorrect)
+        VALUES (${name}, ${constituency || 'Unknown Constituency'}, 'Unknown', 'Unknown', TRUE)
+        RETURNING id
+      `;
+      return { success: true, message: 'Placeholder MLA created and flagged as incorrect', mlaId: newMla.id };
+    }
+
+    await sql`
+      UPDATE mlas
+      SET is_incorrect = TRUE, updated_at = NOW()
+      WHERE id = ${mla.id}
+    `;
+    return { success: true, message: 'MLA details flagged as incorrect', mlaId: mla.id };
+  })
+
+  .get('/api/users/volunteers/constituency/:constituency', async ({ params, set, request }) => {
+    // Auth: Require authenticated user to view volunteer PII
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to view volunteer details' };
+    }
+
+    const { constituency } = params;
+    // Only expose non-PII fields to other authenticated users
+    const volunteers = await sql`
+      SELECT display_name, job_title
+      FROM users
+      WHERE home_constituency = ${constituency}
+      ORDER BY created_at ASC
+      LIMIT 5
+    `;
+    return { volunteers };
   })
 
   // ─── Enhanced News Scraper Trigger (ADMIN) ───
@@ -583,25 +783,15 @@ const app = new Elysia()
     return { success: true, projectsInserted: countProjects };
   })
 
-  // ─── MLA Scraper Trigger (ADMIN) ─────────────
-  .post('/api/scraper/mla/run', async ({ request, set }) => {
-    const adminKey = request.headers.get('x-admin-key');
-    if (!requireAdmin(adminKey)) {
-      set.status = 403;
-      return { error: 'Forbidden. Valid admin key required.' };
-    }
-    const countMlas = await runMlaScraper();
-    return { success: true, mlasUpdated: countMlas };
-  })
-
   // ─── Volunteer System: Submit Data ───────────
-  .post('/api/volunteer/submit', async ({ body, set }) => {
-    const { type, data, submittedBy, submitterEmail } = body as any;
-
-    if (!type || !data || !submittedBy) {
-      set.status = 400;
-      return { error: 'type, data, and submittedBy are required' };
+  .post('/api/volunteer/submit', async ({ body, set, request }) => {
+    // Auth: Require authenticated user for volunteer submissions
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to submit volunteer data' };
     }
+
+    const { type, data, submittedBy, submitterEmail } = body;
 
     try {
       const result = await submitVolunteerData({ type, data, submittedBy, submitterEmail });
@@ -610,40 +800,65 @@ const app = new Elysia()
       set.status = 500;
       return { error: 'Submission failed' };
     }
+  }, {
+    body: t.Object({
+      type: t.String(),
+      data: t.Any(),
+      submittedBy: t.String(),
+      submitterEmail: t.Optional(t.Union([t.String(), t.Null()]))
+    })
   })
 
   // ─── Volunteer System: Get Pending ────────────
-  .get('/api/volunteer/pending', async () => {
+  .get('/api/volunteer/pending', async ({ set, request }) => {
+    // Auth: Require authenticated user to see pending queue
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to view pending submissions' };
+    }
+
     const pending = await getPendingSubmissions(50);
     return { submissions: pending };
   })
 
   // ─── Volunteer System: Verify Submission ──────
-  .post('/api/volunteer/verify/:id', async ({ params, body, set }) => {
-    const { verifierId, approved, notes } = body as any;
-
-    if (!verifierId || typeof approved !== 'boolean') {
-      set.status = 400;
-      return { error: 'verifierId and approved (boolean) are required' };
+  .post('/api/volunteer/verify/:id', async ({ params, body, set, request }) => {
+    // Auth: Require authenticated user for verification
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to verify submissions' };
     }
 
+    const { verifierId, approved, notes } = body;
+
     try {
-      const result = await verifySubmission(params.id, verifierId, approved, notes);
+      // Pass authenticated userId to prevent Sybil attacks
+      const result = await verifySubmission(params.id, verifierId, approved, notes, auth.userId || undefined);
       return { success: true, ...result };
     } catch (e) {
       set.status = 500;
       return { error: 'Verification failed' };
     }
+  }, {
+    params: t.Object({
+      id: t.String()
+    }),
+    body: t.Object({
+      verifierId: t.String(),
+      approved: t.Boolean(),
+      notes: t.Optional(t.Union([t.String(), t.Null()]))
+    })
   })
 
   // ─── Clerk User Sync (auto-create on first login) ───
-  .post('/api/users/sync', async ({ body, set }) => {
-    const { clerkId, displayName, avatarUrl, email } = body as any;
-
-    if (!clerkId || typeof clerkId !== 'string') {
-      set.status = 400;
-      return { error: 'clerkId is required.' };
+  .post('/api/users/sync', async ({ body, set, request }) => {
+    // Auth: Require authenticated user for sync
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required' };
     }
+
+    const { clerkId, displayName, avatarUrl, email } = body;
 
     const safeName = (displayName || 'Citizen Hero').replace(/<[^>]*>/g, '').slice(0, 50);
 
@@ -659,31 +874,62 @@ const app = new Elysia()
     `;
 
     return { success: true, user };
+  }, {
+    body: t.Object({
+      clerkId: t.String(),
+      displayName: t.Optional(t.Union([t.String(), t.Null()])),
+      avatarUrl: t.Optional(t.Union([t.String(), t.Null()])),
+      email: t.Optional(t.Union([t.String(), t.Null()]))
+    })
   })
 
   // ─── Get User by Clerk ID ────────────────────
-  .get('/api/users/clerk/:clerkId', async ({ params, set }) => {
+  .get('/api/users/clerk/:clerkId', async ({ params, set, request }) => {
+    // SECURITY: Require auth to prevent PII enumeration
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to view user profiles' };
+    }
+
     const [user] = await sql`
       SELECT 
-        id, clerk_id, display_name, job_title, socials, avatar_url, email,
+        id, clerk_id, display_name, job_title, socials, avatar_url,
         reports_published, reports_verified, integrations_helped,
         (reports_published * 10 + reports_verified * 20 + integrations_helped * 50) AS civic_sense_score,
+        home_constituency, home_city, home_state,
         created_at
       FROM users WHERE clerk_id = ${params.clerkId}
     `;
 
     if (!user) { set.status = 404; return { error: 'User not found' }; }
+
+    // Only expose PII (email, home_*) to the user themselves
+    const isOwner = auth.userId === params.clerkId;
+    if (!isOwner) {
+      // Strip sensitive fields for non-owners
+      const { email, ...safeUser } = user as any;
+      return { user: safeUser };
+    }
     return { user };
   })
 
   // ─── Update User by Clerk ID ─────────────────
-  .put('/api/users/clerk/:clerkId', async ({ params, body }) => {
-    const { jobTitle, socials } = body as any;
+  .put('/api/users/clerk/:clerkId', async ({ params, body, set, request }) => {
+    // Auth: IDOR Protection — user can only update their own profile
+    const auth = await verifyAuth(request);
+    if (!requireOwnership(auth, params.clerkId, set)) {
+      return { error: 'You can only update your own profile' };
+    }
+
+    const { jobTitle, socials, homeConstituency, homeCity, homeState } = body as any;
 
     await sql`
       UPDATE users SET
         job_title = COALESCE(${jobTitle ? jobTitle.replace(/<[^>]*>/g, '').slice(0, 50) : null}, job_title),
-        socials = COALESCE(${JSON.stringify(socials || null)}, socials)
+        socials = COALESCE(${JSON.stringify(socials || null)}, socials),
+        home_constituency = COALESCE(${homeConstituency || null}, home_constituency),
+        home_city = COALESCE(${homeCity || null}, home_city),
+        home_state = COALESCE(${homeState || null}, home_state)
       WHERE clerk_id = ${params.clerkId}
     `;
 
@@ -691,7 +937,13 @@ const app = new Elysia()
   })
 
   // ─── User Profile CRUD (legacy UUID-based) ──
-  .post('/api/users', async ({ body, set }) => {
+  .post('/api/users', async ({ body, set, request }) => {
+    // SECURITY: Require authenticated user (prevents mass fake account creation)
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to create user profile' };
+    }
+
     const { displayName, jobTitle, socials } = body as any;
 
     const safeName = (displayName || 'Citizen Hero').replace(/<[^>]*>/g, '').slice(0, 50);
@@ -706,7 +958,13 @@ const app = new Elysia()
     return { success: true, user };
   })
 
-  .put('/api/users/:id', async ({ params, body, set }) => {
+  .put('/api/users/:id', async ({ params, body, set, request }) => {
+    // Auth: Require authenticated user for profile updates
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to update profile' };
+    }
+
     const { displayName, jobTitle, socials, avatarUrl } = body as any;
 
     // Validate UUID format
@@ -754,7 +1012,7 @@ const app = new Elysia()
   })
 
   // ─── Start Server ────────────────────────────
-  .listen({ port: 4000, hostname: '0.0.0.0' });
+  .listen({ port: process.env.PORT ? parseInt(process.env.PORT, 10) : 6969, hostname: '0.0.0.0' });
 
 console.log(`🟢 FixIndia.org API running at http://0.0.0.0:${app.server?.port}`);
 
