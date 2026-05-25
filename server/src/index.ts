@@ -106,6 +106,7 @@ const PROD_ORIGINS = [
   'https://www.fixindia.org',
   'https://fixindia.pages.dev',
   'https://help.fixindia.org',
+  'https://fixindia-volunteer.pages.dev',
   'https://builder.fixindia.org',
 ];
 
