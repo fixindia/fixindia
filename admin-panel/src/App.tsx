@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment, react-hooks/exhaustive-deps */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment, react-hooks/exhaustive-deps */
 import { useState, useEffect } from 'react';
 import { 
   LayoutDashboard, 
@@ -64,7 +64,11 @@ interface VolunteerSubmission {
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'ai-models' | 'volunteer' | 'scrapers' | 'sql'>('dashboard');
   const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('admin_api_url') || DEFAULT_API_URL);
-  const [adminKey, setAdminKey] = useState(() => localStorage.getItem('admin_key') || '');
+  // SECURITY (6.2): the admin key is held in memory ONLY for this session and
+  // is NEVER written to localStorage. Any XSS would otherwise exfiltrate full
+  // admin access, and it would persist on shared machines. Prefer Cloudflare
+  // Access (cf-access-jwt-assertion) in production so no key sits client-side.
+  const [adminKey, setAdminKey] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
   
@@ -110,15 +114,24 @@ export default function App() {
     return headers;
   };
 
-  // Test connection and fetch initial stats
+  // Validate the admin KEY, not just server reachability. Hitting the
+  // unauthenticated /health endpoint made any non-empty key "authenticate"
+  // (the dashboard rendered, then every real call silently 401'd). Instead we
+  // probe an authenticated endpoint with the key: 200 => valid, 401/403 =>
+  // wrong key, network error => unreachable. All three surface as isConnected.
   const testConnection = async () => {
     setIsConnected(null);
+    if (!adminKey) {
+      setIsConnected(false);
+      return false;
+    }
     try {
-      const res = await fetch(`${apiUrl}/health`);
+      const res = await fetch(`${apiUrl}/api/admin/metrics`, { headers: getHeaders() });
       if (res.ok) {
         setIsConnected(true);
         return true;
       }
+      // 401/403 (bad key) or any non-2xx => not authenticated.
       setIsConnected(false);
       return false;
     } catch {
@@ -245,8 +258,9 @@ export default function App() {
 
   // Save Settings handler
   const handleSaveSettings = () => {
+    // Only the API URL is persisted — it is not a secret. The admin key stays
+    // in memory only (see 6.2) and must be re-entered on reload.
     localStorage.setItem('admin_api_url', apiUrl);
-    localStorage.setItem('admin_key', adminKey);
     setShowSettings(false);
     testConnection();
   };
@@ -412,6 +426,63 @@ export default function App() {
     link.click();
     document.body.removeChild(link);
   };
+
+  if (adminKey && isConnected === null) {
+    return (
+      <div className="min-h-screen bg-[#070a13] flex flex-col items-center justify-center space-y-4">
+        <RefreshCw className="animate-spin text-emerald-500" size={32} />
+        <p className="text-slate-400 font-mono text-sm tracking-widest">VERIFYING CREDENTIALS...</p>
+      </div>
+    );
+  }
+
+  if (!adminKey || isConnected === false) {
+    return (
+      <div className="min-h-screen bg-[#070a13] flex items-center justify-center p-4 font-mono">
+        <div className="max-w-md w-full glass p-8 rounded-2xl border border-[#1e293b] shadow-2xl">
+          <div className="flex justify-center mb-6">
+            <div className="bg-emerald-500/10 p-4 rounded-full border border-emerald-500/20">
+              <Shield className="text-emerald-400" size={32} />
+            </div>
+          </div>
+          <h2 className="text-2xl font-bold text-center text-white mb-2">Admin Authentication</h2>
+          <p className="text-slate-400 text-center text-sm mb-8">
+            Enter your admin key or authenticate via Cloudflare Access to proceed.
+          </p>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold uppercase text-slate-400 mb-1.5">Admin Key</label>
+              <input
+                type="password"
+                value={adminKey}
+                onChange={e => setAdminKey(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    testConnection();
+                  }
+                }}
+                className="w-full bg-[#0b0f19] border border-[#334155] rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-emerald-500 transition-colors"
+                placeholder="Enter Secure Key..."
+              />
+            </div>
+            <button
+              onClick={() => {
+                testConnection();
+              }}
+              disabled={isConnected === null}
+              className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-black font-bold uppercase tracking-wider py-3 rounded-lg transition-colors flex items-center justify-center space-x-2"
+            >
+              {isConnected === null ? <RefreshCw className="animate-spin" size={18} /> : <Shield size={18} />}
+              <span>{isConnected === null ? 'Verifying...' : 'Authenticate'}</span>
+            </button>
+            {isConnected === false && adminKey && (
+              <p className="text-rose-400 text-xs text-center mt-2">Connection failed. Invalid key or API offline.</p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#0b0f19] text-[#f3f4f6]">
@@ -988,7 +1059,7 @@ export default function App() {
                           type="password"
                           value={editingModel.api_key || ''}
                           onChange={e => setEditingModel(prev => ({ ...prev, api_key: e.target.value }))}
-                          placeholder="Overrides Env Var if provided"
+                          placeholder="Leave blank to keep current key / use env var"
                           className="w-full bg-[#0b0f19] border border-[#334155] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
                         />
                       </div>
@@ -1104,7 +1175,7 @@ export default function App() {
 
                         <div className="flex space-x-2">
                           <button
-                            onClick={() => setEditingModel(model)}
+                            onClick={() => setEditingModel({ ...model, api_key: '' })}
                             className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors"
                             title="Edit"
                           >

@@ -56,21 +56,63 @@ We love contributors, but we have a very specific culture here:
 ### Prerequisites
 - [Bun](https://bun.sh) (Backend runtime)
 - [Node.js](https://nodejs.org) (Frontend tools)
-- [PostgreSQL](https://www.postgresql.org) + [PostGIS](https://postgis.net)
+- [PostgreSQL](https://www.postgresql.org) + [PostGIS](https://postgis.net) — or just use Docker (see below)
 
 ### Quick Start
 1.  **Clone the repo**: `git clone https://github.com/fixindia/fixindia.git`
 2.  **Install everything**:
     ```bash
-    npm install          # Root/Frontend
-    cd server && bun install  # Backend
+    npm install              # Root / Frontend
+    cd server && bun install # Backend
+    cd ../admin-panel && npm install  # Admin panel (optional)
     ```
-3.  **Setup your environment**: Copy `.env.example` to `.env` in both the root and `server/` directories and fill in your keys.
+3.  **Setup your environment**: Copy `.env.example` to `.env` in both the root
+    and `server/` directories and fill in your keys.
+    - Root `.env` needs `VITE_API_URL` (the backend URL) and
+      `VITE_CLERK_PUBLISHABLE_KEY`. For local dev:
+      `VITE_API_URL=http://localhost:6969`.
+    - `server/.env` needs `DATABASE_URL`, `CLERK_SECRET_KEY`, Storj + AI keys,
+      and (for the admin API) `ADMIN_KEY`. See `server/.env.example`.
 4.  **Launch the engine**:
     ```bash
-    npm run dev          # Frontend on :3000
-    cd server && bun dev # Backend on :4000
+    npm run dev          # Frontend on http://localhost:5173 (Vite default)
+    cd server && bun dev # Public API on http://localhost:6969
     ```
+
+### Run the full stack locally
+
+The app is **three processes** + a database:
+
+| Service | Command | Port |
+|---|---|---|
+| Frontend SPA (citizen site) | `npm run dev` | 5173 |
+| Public API (Clerk-authed) | `cd server && bun src/index.ts` | 6969 |
+| Admin API (CF-Access / ADMIN_KEY) | `cd server && bun src/admin.ts` | 6970 |
+| Admin panel SPA | `cd admin-panel && npm run dev` | 5173 (separate) |
+
+**Database (Postgres + PostGIS) via Docker** (no system install needed):
+```bash
+docker compose up -d                       # starts Postgres+PostGIS on :5432
+psql postgresql://fixindia:fixindia_dev@localhost:5432/fixindia -f server/schema.sql
+```
+Then set `DATABASE_URL=postgresql://fixindia:fixindia_dev@localhost:5432/fixindia`
+in `server/.env`. The backend runs `migrate.ts` idempotently on startup, so
+`schema.sql` is only needed for a fresh DB.
+
+**Note on ports:** the README previously said the frontend runs on `:3000` and
+the API on `:4000` — both were wrong. Vite defaults to **5173** and the API
+listens on **6969** (public) / **6970** (admin), per `server/ecosystem.config.json`.
+`VITE_API_URL` must point at the public API (6969).
+
+### Tests
+```bash
+cd server && bun test   # backend (pure-function unit tests, no DB needed)
+npm test                # frontend (Vitest, mocked fetch)
+```
+
+### Production deploy
+See `docs/DEPLOYMENT-CHECKLIST.md` for the network/secrets/process checklist
+the code assumes, and `server/deploy.sh` for the on-server deploy script.
 
 ---
 

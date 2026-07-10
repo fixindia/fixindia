@@ -2,20 +2,25 @@
  * Clerk JWT verification middleware for Elysia
  * Verifies Bearer tokens from Clerk on protected endpoints.
  */
-import { createClerkClient } from '@clerk/backend';
+import { verifyToken } from '@clerk/backend';
+import { env } from './config';
 
-const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY;
+const CLERK_SECRET_KEY = env.CLERK_SECRET_KEY;
 
 if (!CLERK_SECRET_KEY) {
-  if (process.env.NODE_ENV === 'production') {
+  if (env.isProduction) {
     throw new Error('CLERK_SECRET_KEY environment variable is required in production');
   }
   console.warn('⚠️  CLERK_SECRET_KEY not set. Auth verification will be disabled (dev mode only).');
 }
 
-const clerkClient = CLERK_SECRET_KEY
-  ? createClerkClient({ secretKey: CLERK_SECRET_KEY })
-  : null;
+// Whether token verification is possible. In @clerk/backend v3 there is NO
+// `verifyToken` method on the createClerkClient() instance — it is only exported
+// as a standalone function. Calling it off the client throws
+// "clerkClient.verifyToken is not a function", which the catch below swallowed
+// into a 401, silently breaking EVERY authenticated endpoint. We use the
+// standalone `verifyToken(token, { secretKey })` instead.
+const authEnabled = !!CLERK_SECRET_KEY;
 
 export interface AuthResult {
   authenticated: boolean;
@@ -41,8 +46,8 @@ export async function verifyAuth(request: Request): Promise<AuthResult> {
   }
 
   // SECURITY: Never auto-grant access when Clerk is not configured
-  if (!clerkClient) {
-    if (process.env.NODE_ENV === 'production') {
+  if (!authEnabled) {
+    if (env.isProduction) {
       // Should never reach here — startup throws if key is missing in production
       return { authenticated: false, userId: null, error: 'Auth system not configured' };
     }
@@ -51,7 +56,9 @@ export async function verifyAuth(request: Request): Promise<AuthResult> {
   }
 
   try {
-    const verifiedToken = await clerkClient.verifyToken(token);
+    // Standalone verifyToken (networked JWKS verification keyed by the secret).
+    // Throws on any invalid/expired token, which the catch turns into a 401.
+    const verifiedToken = await verifyToken(token, { secretKey: CLERK_SECRET_KEY });
     const userId = verifiedToken.sub;
 
     if (!userId) {

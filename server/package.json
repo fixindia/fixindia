@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
-    "seed": "bun src/seed.ts"
+    "seed": "bun src/seed.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1031.0",

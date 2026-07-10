@@ -15,7 +15,9 @@ export const securityHeaders: Record<string, string> = {
   'Referrer-Policy': 'strict-origin-when-cross-origin',
 
   // Content Security Policy (hardened — no unsafe-eval)
-  'Content-Security-Policy': [
+  // 10A.4: report violations to the in-app collector at /api/csp-report so
+  // real-world violations surface in the logs instead of failing silently.
+  "Content-Security-Policy": [
     "default-src 'self'",
     "script-src 'self' https://clerk.fixindia.org https://*.clerk.accounts.dev",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",  // inline styles needed for map + Clerk
@@ -24,7 +26,16 @@ export const securityHeaders: Record<string, string> = {
     "connect-src 'self' https://api.enjoyxd.eu.org https://*.clerk.accounts.dev https://clerk.fixindia.org https://api.clerk.com https://gateway.storjshare.io",
     "frame-src 'self' https://*.clerk.accounts.dev https://clerk.fixindia.org",
     "worker-src 'self' blob:",
+    "report-uri /api/csp-report",
+    "report-to csp-endpoint",
   ].join('; '),
+
+  // Reporting-Api endpoint group referenced by CSP `report-to` (10A.4).
+  "Report-To": JSON.stringify({
+    group: "csp-endpoint",
+    max_age: 10886400,
+    endpoints: [{ url: "/api/csp-report" }],
+  }),
 
   // Permissions policy
   'Permissions-Policy': 'geolocation=(self), camera=(), microphone=()',
@@ -46,11 +57,21 @@ const userRateLimitStore = new Map<string, RateLimitEntry>();
 
 /**
  * Extract the client IP from request headers.
- * Prefers x-forwarded-for (behind proxy/LB), then cf-connecting-ip (Cloudflare).
+ *
+ * TRUSTED-PROXY ASSUMPTION (10A.5): this MUST run behind the Cloudflare
+ * proxy / reverse proxy only. The app must NOT be exposed directly on the
+ * public IP (see docs/PRODUCTION-READINESS.md and the deploy checklist) —
+ * otherwise a client can forge `x-forwarded-for` and trivially spoof the
+ * rate-limit key.
+ *
+ * `cf-connecting-ip` is set by Cloudflare to the real client and is NOT
+ * client-controllable when the origin is only reachable via Cloudflare, so we
+ * prefer it over the first `x-forwarded-for` hop (which is the most easily
+ * spoofed entry in the chain).
  */
 export function getClientIP(request: Request): string {
-  return request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-         request.headers.get('cf-connecting-ip') ||
+  return request.headers.get('cf-connecting-ip') ||
+         request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
          'unknown';
 }
 

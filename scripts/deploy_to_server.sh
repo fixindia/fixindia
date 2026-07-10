@@ -34,29 +34,43 @@ echo "3. Running provisioning and setting up system dependencies..."
 ssh -o StrictHostKeyChecking=no -i "$KEY_PATH" "$REMOTE_USER@$REMOTE_HOST" "chmod +x $REMOTE_DIR/scripts/setup_vm.sh && sudo $REMOTE_DIR/scripts/setup_vm.sh"
 
 echo "4. Setting up server environment variables (.env)..."
-# Generate a secure 32-character hex key for ADMIN_KEY
-ADMIN_KEY=$(openssl rand -hex 16)
-ssh -o StrictHostKeyChecking=no -i "$KEY_PATH" "$REMOTE_USER@$REMOTE_HOST" "bash -c '
-if [ ! -f $REMOTE_DIR/server/.env ]; then
-  cat > $REMOTE_DIR/server/.env << EOF
-DATABASE_URL=postgresql://fixindia:fixindia_secure_pass@localhost:5432/fixindia
+# Generate a secure 64-char hex ADMIN_KEY (config.ts requires >= 32 chars in prod).
+# SECURITY: The key is written straight into the remote .env and is NEVER echoed to
+# stdout — build logs and shell history are an exfiltration path. Retrieve it later
+# with:  ssh ... "grep '^ADMIN_KEY=' $REMOTE_DIR/server/.env"
+ADMIN_KEY=$(openssl rand -hex 32)
+ssh -o StrictHostKeyChecking=no -i "$KEY_PATH" "$REMOTE_USER@$REMOTE_HOST" ADMIN_KEY="$ADMIN_KEY" REMOTE_DIR="$REMOTE_DIR" 'bash -s' <<'REMOTE'
+if [ ! -f "$REMOTE_DIR/server/.env" ]; then
+  ( umask 077
+    cat > "$REMOTE_DIR/server/.env" << EOF
+# Real values must be filled in on the server — never commit this file.
+# Rotate anything that leaks (see docs/SECRET-ROTATION.md).
+DATABASE_URL=postgresql://fixindia:CHANGE_ME_STRONG_PASSWORD@localhost:5432/fixindia
 ADMIN_KEY=$ADMIN_KEY
+CLERK_SECRET_KEY=sk_live_CHANGE_ME
 STORJ_ENDPOINT=https://gateway.storjshare.io
 STORJ_BUCKET=civicmap
-STORJ_ACCESS_KEY=placeholder_access_key_change_me
-STORJ_SECRET_KEY=placeholder_secret_key_change_me
-GROQ_API_KEYS=placeholder_groq_key_change_me
+STORJ_ACCESS_KEY=CHANGE_ME
+STORJ_SECRET_KEY=CHANGE_ME
+GROQ_API_KEYS=CHANGE_ME
 NODE_ENV=production
 EOF
-  echo \"Created new server/.env with generated ADMIN_KEY: $ADMIN_KEY\"
+  )
+  chmod 600 "$REMOTE_DIR/server/.env"
+  echo "Created new server/.env (ADMIN_KEY written to file, not printed)."
 else
-  echo \"server/.env already exists, skipping creation.\"
+  echo "server/.env already exists, skipping creation."
 fi
-'"
+REMOTE
+# Clear the key from the local shell environment.
+unset ADMIN_KEY
 
 echo "5. Running database migrations and seeding data..."
+# PGPASSWORD is read from the server's own .env (DATABASE_URL) rather than being
+# hardcoded here. This keeps the DB password out of this script and out of logs.
 ssh -o StrictHostKeyChecking=no -i "$KEY_PATH" "$REMOTE_USER@$REMOTE_HOST" "bash -c '
-export PGPASSWORD=fixindia_secure_pass
+set -a; . $REMOTE_DIR/server/.env; set +a
+export PGPASSWORD=\$(printf %s \"\$DATABASE_URL\" | sed -E \"s|.*://[^:]+:([^@]+)@.*|\\1|\")
 echo \"Running schema.sql...\"
 psql -h localhost -U fixindia -d fixindia -f $REMOTE_DIR/server/schema.sql
 
@@ -86,6 +100,8 @@ echo "=========================================="
 echo "✅ Server Setup & Deployment Complete!"
 echo "=========================================="
 echo "Backend URL: https://api.enjoyxd.eu.org"
-echo "Generated ADMIN_KEY: $ADMIN_KEY"
-echo "⚠️  IMPORTANT: Please SSH to the server and update $REMOTE_DIR/server/.env with your real Storj and Groq keys!"
+echo "⚠️  IMPORTANT: SSH to the server and fill in real values in $REMOTE_DIR/server/.env"
+echo "    (DATABASE_URL password, CLERK_SECRET_KEY, Storj + Groq keys)."
+echo "    Retrieve the generated ADMIN_KEY with:"
+echo "      ssh -i $KEY_PATH $REMOTE_USER@$REMOTE_HOST \"grep '^ADMIN_KEY=' $REMOTE_DIR/server/.env\""
 echo "=========================================="

@@ -1,9 +1,11 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
 import { Elysia, t } from 'elysia';
 import { cors } from '@elysiajs/cors';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import sql from './db';
 import { storage } from './lib/storage';
+import { logger } from './lib/logger';
+import { withTtlCache } from './lib/cache';
 import { runProjectScraper } from './project_scraper';
 import { runEnhancedNewsScraper } from './enhanced_scraper';
 import { runMultiCityMLAScraper } from './multi_city_mla_scraper';
@@ -11,75 +13,37 @@ import { submitVolunteerData, getPendingSubmissions, verifySubmission } from './
 import { securityHeaders, generateFingerprint, checkRateLimit, checkUserRateLimit, sanitizeInput, sanitizeTitle, validateImageMagicBytes } from './security';
 import { verifyAuth, requireAuth, requireOwnership } from './auth';
 import cron from 'node-cron';
-import { validateEnv } from './config';
+import { validateEnv, env } from './config';
+import { runMigrations } from './migrate';
 import { SCRAPING_SCHEDULE } from './config/cities';
 
 // Validate environment variables on startup
 validateEnv();
 
-// Run database migrations on startup
+// Run database migrations on startup (serialized via advisory lock; safe to run
+// concurrently with the admin API process).
 try {
-  console.log('🔄 Running database migrations...');
-  await sql`
-    ALTER TABLE mlas 
-    ADD COLUMN IF NOT EXISTS is_incorrect BOOLEAN DEFAULT FALSE,
-    ADD COLUMN IF NOT EXISTS latitude NUMERIC(9,6),
-    ADD COLUMN IF NOT EXISTS longitude NUMERIC(9,6)
-  `;
-  await sql`
-    ALTER TABLE users 
-    ADD COLUMN IF NOT EXISTS home_constituency TEXT,
-    ADD COLUMN IF NOT EXISTS home_city TEXT,
-    ADD COLUMN IF NOT EXISTS home_state TEXT
-  `;
-  await sql`
-    CREATE TABLE IF NOT EXISTS ai_models (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
-      provider TEXT NOT NULL CHECK (provider IN ('Groq', 'OpenRouter', 'OpenAI', 'Gemini', 'Anthropic')),
-      model_string TEXT NOT NULL,
-      api_key TEXT,
-      api_key_env_var TEXT NOT NULL,
-      api_endpoint TEXT,
-      priority INTEGER NOT NULL DEFAULT 1,
-      is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-      is_free BOOLEAN NOT NULL DEFAULT TRUE,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `;
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_ai_models_priority ON ai_models(priority) WHERE is_enabled = TRUE
-  `;
-
-  // Seed default models if table is empty
-  const countRes = await sql`SELECT COUNT(*)::integer FROM ai_models`;
-  if (countRes[0] && countRes[0].count === 0) {
-    await sql`
-      INSERT INTO ai_models (name, provider, model_string, api_key_env_var, api_endpoint, priority, is_enabled, is_free)
-      VALUES 
-        ('Groq Llama 3.3 70B', 'Groq', 'llama-3.3-70b-versatile', 'GROQ_API_KEYS', 'https://api.groq.com/openai/v1/chat/completions', 1, TRUE, TRUE),
-        ('OpenRouter Llama 3.3 70B', 'OpenRouter', 'meta-llama/llama-3.3-70b-instruct:free', 'OPENROUTER_API_KEYS', 'https://openrouter.ai/api/v1/chat/completions', 2, TRUE, TRUE),
-        ('OpenRouter Gemini 2.5 Flash', 'OpenRouter', 'google/gemini-2.5-flash:free', 'OPENROUTER_API_KEYS', 'https://openrouter.ai/api/v1/chat/completions', 3, TRUE, TRUE)
-    `;
-    console.log('✓ Seeded default AI models.');
-  }
-  console.log('✓ Database migrations complete.');
+  logger.info('Running database migrations...');
+  await runMigrations();
+  logger.info('Database migrations complete.');
 } catch (err) {
-  console.error('❌ Database migration failed:', err);
+  logger.error('Database migration failed', { error: String(err) });
 }
 
 // ─── Security: In-memory rate limiter ──────────
 // Now using enhanced fingerprinting from security.ts
 
 // Admin key for sensitive operations
-const ADMIN_KEY = process.env.ADMIN_KEY;
+const ADMIN_KEY = env.ADMIN_KEY;
 if (!ADMIN_KEY) {
-  if (process.env.NODE_ENV === 'production') {
+  if (env.isProduction) {
     throw new Error('ADMIN_KEY environment variable is not set');
   }
-  console.warn('⚠️  ADMIN_KEY not set. Admin endpoints will be disabled.');
+  logger.warn('ADMIN_KEY not set. Admin endpoints will be disabled.');
 }
+
+// Shared UUID validator (v4-ish; matches gen_random_uuid() output shape)
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Constant-time string comparison to prevent timing attacks
 function constantTimeCompare(a: string, b: string): boolean {
@@ -116,7 +80,7 @@ const DEV_ORIGINS = [
   'http://help.localhost:5173',
 ];
 
-const ALLOWED_ORIGINS = process.env.NODE_ENV === 'production'
+const ALLOWED_ORIGINS = env.isProduction
   ? PROD_ORIGINS
   : [...PROD_ORIGINS, ...DEV_ORIGINS];
 
@@ -141,8 +105,24 @@ const app = new Elysia({
     // Note: Vary: Origin is automatically set by @elysiajs/cors middleware
   })
 
-  // ─── Enhanced Rate Limiting with Fingerprinting ───
-  .onBeforeHandle(({ request, set }) => {
+  // ─── Per-request ID + Enhanced Rate Limiting + body-size guard ───
+  .onBeforeHandle(({ request, set, store }) => {
+    // Attach a short request id so errors can be traced end-to-end.
+    const reqId = (store as any).requestId || crypto.randomUUID();
+    (store as any).requestId = reqId;
+
+    // 10A.2: Per-route body-size limit. The global cap is 15 MB to allow image
+    // uploads (multipart/form-data). JSON payloads on non-upload routes are
+    // tiny, so reject anything that is NOT multipart but larger than 32 KB
+    // early — this stops oversized JSON bodies from being parsed/processed.
+    const ct = (request.headers.get('content-type') || '').toLowerCase();
+    const contentLength = parseInt(request.headers.get('content-length') || '0', 10);
+    const isMultipart = ct.startsWith('multipart/form-data');
+    if (!isMultipart && contentLength > 32 * 1024) {
+      set.status = 413;
+      return { error: 'Payload too large.', requestId: reqId };
+    }
+
     const fingerprint = generateFingerprint(request);
     const isWrite = request.method === 'POST' || request.method === 'PUT';
     const limit = isWrite ? 30 : 120;
@@ -152,15 +132,53 @@ const app = new Elysia({
     if (!result.allowed) {
       set.status = 429;
       set.headers['Retry-After'] = String(result.retryAfter || 60);
-      return { error: 'Too many requests. Slow down.', retryAfter: result.retryAfter };
+      return { error: 'Too many requests. Slow down.', retryAfter: result.retryAfter, requestId: reqId };
     }
   })
 
-  // ─── Health Check ────────────────────────────
+  // ─── Health Check (liveness — cheap, no DB) ───
   .get('/health', () => ({ status: 'ok', timestamp: new Date().toISOString() }))
 
+  // ─── Readiness Check (verifies the DB is reachable) ───
+  .get('/health/ready', async ({ set }) => {
+    try {
+      // Race the DB ping against a 2s timeout so a stuck Postgres can't hang
+      // the load balancer / deploy health check.
+      const ping = sql`SELECT 1`;
+      const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('DB ping timed out')), 2000),
+      );
+      await Promise.race([ping, timeout]);
+      return { status: 'ready', timestamp: new Date().toISOString() };
+    } catch (err) {
+      logger.error('Readiness check failed', { error: String(err) });
+      set.status = 503;
+      return { status: 'degraded', timestamp: new Date().toISOString() };
+    }
+  })
+
+  // ─── CSP Violation Report Collector (10A.4) ───
+  // Browsers POST `application/csp-report` (or `application/reports+json` for
+  // the Reporting-Api) here when a Content-Security-Policy directive blocks
+  // something. We log the violation so real-world issues surface; no PII is
+  // stored. Returns 204 so the browser is satisfied.
+  .post('/api/csp-report', async ({ request, set }) => {
+    try {
+      const ct = (request.headers.get('content-type') || '').toLowerCase();
+      const text = await request.text();
+      let report: unknown = text;
+      try { report = JSON.parse(text); } catch { /* leave as raw text */ }
+      logger.warn('CSP violation reported', { contentType: ct, report });
+    } catch (err) {
+      logger.warn('Failed to read CSP report', { error: String(err) });
+    }
+    set.status = 204;
+    return '';
+  })
+
   // ─── Map Context: Bounding Box Query ─────────
-  .get('/api/map/context', async ({ query }) => {
+  .get('/api/map/context', async ({ query, set, store }) => {
+    const reqId = (store as any).requestId;
     const { west, south, east, north } = query;
 
     const w = parseFloat(west as string);
@@ -177,139 +195,148 @@ const app = new Elysia({
       return { error: 'Bounding box too large. Max 5 degrees.' };
     }
 
-    const reports = await sql`
-      SELECT 
-        id, title, category, custom_category, status, severity,
-        agency, ward_name, mla_name, sanctioned_budget,
-        upvotes, verification_count,
-        ST_Y(location::geometry) as latitude,
-        ST_X(location::geometry) as longitude,
-        created_at, creator_id,
-        zone, parliamentary_constituency, mp_name,
-        image_url, source_url
-      FROM reports
-      WHERE ST_Intersects(
-        location,
-        ST_MakeEnvelope(${w}, ${s}, ${e}, ${n}, 4326)::geography
-      )
-      ORDER BY created_at DESC
-      LIMIT 200
-    `;
+    try {
+      // 8.1: do the nearby-news matching in SQL with a LATERAL + ST_DWithin
+      // spatial join instead of an O(reports × news) JS nested loop. The
+      // GiST indexes on reports.location and local_news.location make this
+      // cheap, and it runs on every map pan.
+      // 0.01 degrees ≈ ~1.1 km at the equator (matches the old JS threshold).
+      const rows = await sql`
+        SELECT
+          r.id, r.title, r.category, r.custom_category, r.status, r.severity,
+          r.agency, r.ward_name, r.mla_name, r.sanctioned_budget,
+          r.upvotes, r.verification_count,
+          ST_Y(r.location::geometry) AS latitude,
+          ST_X(r.location::geometry) AS longitude,
+          r.created_at, r.creator_id,
+          r.zone, r.parliamentary_constituency, r.mp_name,
+          r.image_url, r.source_url,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'source', n.source,
+                'title', n.headline,
+                'url', n.url,
+                'snippet', n.snippet,
+                'isTragic', n.is_tragic,
+                'date', to_char(n.published_at, 'YYYY-MM-DD"T"HH24:MI:SSOF')
+              )
+            ) FILTER (WHERE n.id IS NOT NULL),
+            '[]'::json
+          ) AS news_context
+        FROM reports r
+        LEFT JOIN LATERAL (
+          SELECT n.id, n.headline, n.url, n.source, n.snippet, n.is_tragic, n.published_at
+          FROM local_news n
+          WHERE ST_DWithin(n.location, r.location, 1100)  -- ~0.01 deg / ~1.1 km
+            AND n.confidence_score >= 50
+          ORDER BY n.published_at DESC
+          LIMIT 5
+        ) n ON TRUE
+        WHERE ST_Intersects(
+          r.location,
+          ST_MakeEnvelope(${w}, ${s}, ${e}, ${n}, 4326)::geography
+        )
+        -- news_context is aggregated with json_agg, so every non-aggregated
+        -- column must be grouped. reports.id is the PK, so grouping by it alone
+        -- lets Postgres treat all other r.* columns as functionally dependent.
+        GROUP BY r.id
+        ORDER BY r.created_at DESC
+        LIMIT 200
+      `;
 
-    const news = await sql`
-      SELECT
-        id, headline, url, source, snippet, is_tragic,
-        ST_Y(location::geometry) as latitude,
-        ST_X(location::geometry) as longitude,
-        published_at, confidence_score
-      FROM local_news
-      WHERE ST_Intersects(
-        location,
-        ST_MakeEnvelope(${w}, ${s}, ${e}, ${n}, 4326)::geography
-      )
-      AND confidence_score >= 50
-      ORDER BY published_at DESC
-      LIMIT 50
-    `;
+      const issuesWithNews = rows.map((r: any) => {
+        const imageUrl = r.image_url ? storage.getPublicUrl(r.image_url) : null;
+        const newsContext = Array.isArray(r.news_context) && r.news_context.length > 0
+          ? r.news_context.map((nn: any) => ({ ...nn, date: formatRelativeTime(nn.date) }))
+          : undefined;
+        return {
+          id: r.id,
+          latitude: r.latitude,
+          longitude: r.longitude,
+          title: r.title,
+          category: r.category,
+          customCategory: r.custom_category,
+          status: r.status,
+          severity: r.severity,
+          agency: r.agency,
+          ward: r.ward_name,
+          mla: r.mla_name,
+          sanctionedBudget: r.sanctioned_budget,
+          upvotes: r.upvotes,
+          verificationCount: r.verification_count,
+          timestamp: formatRelativeTime(r.created_at),
+          newsContext,
+          zone: r.zone,
+          parliament: r.parliamentary_constituency,
+          mp: r.mp_name,
+          imageUrl,
+          sourceUrl: r.source_url,
+        };
+      });
 
-    const filteredNews = news.map((n: any) => ({
-      ...n,
-      lat: n.latitude,
-      lng: n.longitude
-    }));
-
-    const issuesWithNews = await Promise.all(reports.map(async (r: any) => {
-      const nearby = filteredNews.filter((n: any) => {
-        const dist = Math.sqrt(Math.pow(n.lat - r.latitude, 2) + Math.pow(n.lng - r.longitude, 2));
-        return dist < 0.01;
-      }).map((n: any) => ({
-        id: n.id,
-        source: n.source,
-        title: n.headline,
-        url: n.url,
-        date: formatRelativeTime(n.published_at),
-        snippet: n.snippet,
-        isTragic: n.is_tragic,
-      }));
-
-      // Use public URL instead of signed URL (no API call needed!)
-      const imageUrl = r.image_url ? storage.getPublicUrl(r.image_url) : null;
-
-      return {
-        id: r.id,
-        latitude: r.latitude,
-        longitude: r.longitude,
-        title: r.title,
-        category: r.category,
-        customCategory: r.custom_category,
-        status: r.status,
-        severity: r.severity,
-        agency: r.agency,
-        ward: r.ward_name,
-        mla: r.mla_name,
-        sanctionedBudget: r.sanctioned_budget,
-        upvotes: r.upvotes,
-        verificationCount: r.verification_count,
-        timestamp: formatRelativeTime(r.created_at),
-        newsContext: nearby.length > 0 ? nearby : undefined,
-        zone: r.zone,
-        parliament: r.parliamentary_constituency,
-        mp: r.mp_name,
-        imageUrl: imageUrl,
-        sourceUrl: r.source_url,
-      };
-    }));
-
-    return { issues: issuesWithNews };
+      return { issues: issuesWithNews };
+    } catch (err) {
+      logger.error('Failed to load map context', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load map context', requestId: reqId };
+    }
   })
 
   // ─── All Reports (fallback) ──────────────────
-  .get('/api/reports', async () => {
-    const reports = await sql`
-      SELECT 
-        id, title, category, custom_category, status, severity,
-        agency, ward_name, mla_name, sanctioned_budget,
-        upvotes, verification_count,
-        ST_Y(location::geometry) as latitude,
-        ST_X(location::geometry) as longitude,
-        created_at, creator_id,
-        zone, parliamentary_constituency, mp_name,
-        image_url, source_url
-      FROM reports
-      WHERE status != 'pending_verification'
-      ORDER BY created_at DESC
-      LIMIT 200
-    `;
+  .get('/api/reports', async ({ set, store }) => {
+    const reqId = (store as any).requestId;
+    try {
+      const reports = await sql`
+        SELECT
+          id, title, category, custom_category, status, severity,
+          agency, ward_name, mla_name, sanctioned_budget,
+          upvotes, verification_count,
+          ST_Y(location::geometry) as latitude,
+          ST_X(location::geometry) as longitude,
+          created_at, creator_id,
+          zone, parliamentary_constituency, mp_name,
+          image_url, source_url
+        FROM reports
+        WHERE status != 'pending_verification'
+        ORDER BY created_at DESC
+        LIMIT 200
+      `;
 
-    const issues = await Promise.all(reports.map(async (r: any) => {
-      // Use public URL instead of signed URL
-      const imageUrl = r.image_url ? storage.getPublicUrl(r.image_url) : null;
+      const issues = await Promise.all(reports.map(async (r: any) => {
+        // Use public URL instead of signed URL
+        const imageUrl = r.image_url ? storage.getPublicUrl(r.image_url) : null;
 
-      return {
-        id: r.id,
-        latitude: r.latitude,
-        longitude: r.longitude,
-        title: r.title,
-        category: r.category,
-        customCategory: r.custom_category,
-        status: r.status,
-        severity: r.severity,
-        agency: r.agency,
-        ward: r.ward_name,
-        mla: r.mla_name,
-        sanctionedBudget: r.sanctioned_budget,
-        upvotes: r.upvotes,
-        verificationCount: r.verification_count,
-        timestamp: formatRelativeTime(r.created_at),
-        zone: r.zone,
-        parliament: r.parliamentary_constituency,
-        mp: r.mp_name,
-        imageUrl: imageUrl,
-        sourceUrl: r.source_url,
-      };
-    }));
+        return {
+          id: r.id,
+          latitude: r.latitude,
+          longitude: r.longitude,
+          title: r.title,
+          category: r.category,
+          customCategory: r.custom_category,
+          status: r.status,
+          severity: r.severity,
+          agency: r.agency,
+          ward: r.ward_name,
+          mla: r.mla_name,
+          sanctionedBudget: r.sanctioned_budget,
+          upvotes: r.upvotes,
+          verificationCount: r.verification_count,
+          timestamp: formatRelativeTime(r.created_at),
+          zone: r.zone,
+          parliament: r.parliamentary_constituency,
+          mp: r.mp_name,
+          imageUrl: imageUrl,
+          sourceUrl: r.source_url,
+        };
+      }));
 
-    return { issues };
+      return { issues };
+    } catch (err) {
+      logger.error('Failed to load reports', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load reports', requestId: reqId };
+    }
   })
 
   // ─── Submit Report (validated) ────────────────
@@ -320,7 +347,11 @@ const app = new Elysia({
       return { error: 'Authentication required to submit reports' };
     }
 
-    const { title, category, customCategory, latitude, longitude, severity, creatorId, image } = body;
+    const { title, category, customCategory, latitude, longitude, severity, image } = body;
+    // SECURITY: The creator is ALWAYS the authenticated user. Never trust a
+    // client-supplied creatorId — doing so lets anyone attribute reports (and
+    // the resulting trust points) to arbitrary accounts.
+    const creatorId = auth.userId;
 
     // Per-user rate limit: max 5 reports per 10 minutes
     if (auth.userId) {
@@ -329,6 +360,27 @@ const app = new Elysia({
         set.status = 429;
         return { error: 'Too many reports. Please wait before submitting again.', retryAfter: userLimit.retryAfter };
       }
+    }
+
+    // Validate the cheap metadata FIRST, before spending a Storj upload on it.
+    // (Previously the image was uploaded before these checks, so a rejected
+    // submission still left an orphaned object in object storage.)
+    if (!title || typeof title !== 'string' || title.length < 3 || title.length > 200) {
+      set.status = 400;
+      return { error: 'Title must be 3-200 characters.' };
+    }
+    if (!category || typeof category !== 'string') {
+      set.status = 400;
+      return { error: 'Category is required.' };
+    }
+    // Strict coordinate validation
+    if (typeof latitude !== 'number' || typeof longitude !== 'number' ||
+        isNaN(latitude) || isNaN(longitude) ||
+        !isFinite(latitude) || !isFinite(longitude) ||
+        latitude < -90 || latitude > 90 ||
+        longitude < -180 || longitude > 180) {
+      set.status = 400;
+      return { error: 'Invalid coordinates.' };
     }
 
     let imageUrl = null;
@@ -357,29 +409,10 @@ const app = new Elysia({
       try {
         imageUrl = await storage.uploadImage(image);
       } catch (e) {
-        console.error('Image upload failed:', e);
+        logger.error('Image upload failed', { error: String(e) });
         set.status = 500;
         return { error: 'Image upload failed. Please try again.' };
       }
-    }
-
-    // Input validation
-    if (!title || typeof title !== 'string' || title.length < 3 || title.length > 200) {
-      set.status = 400;
-      return { error: 'Title must be 3-200 characters.' };
-    }
-    if (!category || typeof category !== 'string') {
-      set.status = 400;
-      return { error: 'Category is required.' };
-    }
-    // Strict coordinate validation
-    if (typeof latitude !== 'number' || typeof longitude !== 'number' ||
-        isNaN(latitude) || isNaN(longitude) ||
-        !isFinite(latitude) || !isFinite(longitude) ||
-        latitude < -90 || latitude > 90 ||
-        longitude < -180 || longitude > 180) {
-      set.status = 400;
-      return { error: 'Invalid coordinates.' };
     }
 
     const validSeverity = ['low', 'medium', 'high', 'critical'];
@@ -387,7 +420,8 @@ const app = new Elysia({
     const safeTitle = sanitizeTitle(title);
 
     const wardMatch = await sql`
-      SELECT ward_name, mla_name, sanctioned_budget::text
+      SELECT ward_name, mla_name, sanctioned_budget::text,
+             zone, parliamentary_constituency, mp_name
       FROM wards
       WHERE ST_Contains(
         boundaries::geometry,
@@ -431,7 +465,14 @@ const app = new Elysia({
     `;
 
     if (creatorId) {
-      await sql`UPDATE users SET reports_published = reports_published + 1, trust_score = trust_score + 10 WHERE id = ${creatorId}`;
+      // creatorId is a Clerk ID (e.g. "user_xxx"), which lives in users.clerk_id,
+      // NOT users.id (a UUID). The previous `WHERE id = ${creatorId}` never matched,
+      // so contributors were silently never credited.
+      await sql`
+        UPDATE users
+        SET reports_published = reports_published + 1, trust_score = trust_score + 10
+        WHERE clerk_id = ${creatorId}
+      `;
     }
 
     return { success: true, report };
@@ -443,6 +484,7 @@ const app = new Elysia({
       latitude: t.Numeric({ minimum: -90, maximum: 90 }),
       longitude: t.Numeric({ minimum: -180, maximum: 180 }),
       severity: t.Optional(t.Union([t.Literal('low'), t.Literal('medium'), t.Literal('high'), t.Literal('critical')])),
+      // creatorId intentionally omitted — the server derives it from the verified token.
       creatorId: t.Optional(t.Union([t.String(), t.Null()])),
       image: t.Optional(t.Any()),
     })
@@ -456,20 +498,31 @@ const app = new Elysia({
       return { error: 'Authentication required to upvote' };
     }
 
-    const { userId } = body;
+    // SECURITY: The voter identity is the verified token subject, NOT a body field.
+    // Trusting body.userId let a single user cast unlimited upvotes by rotating IDs,
+    // defeating the UNIQUE(report_id, user_id) constraint.
+    const userId = auth.userId!;
 
     // Per-user rate limit: max 30 upvotes per 10 minutes
-    if (auth.userId) {
-      const userLimit = checkUserRateLimit(auth.userId, 'upvote', 30, 10 * 60 * 1000);
-      if (!userLimit.allowed) {
-        set.status = 429;
-        return { error: 'Too many upvotes. Slow down.', retryAfter: userLimit.retryAfter };
-      }
+    const userLimit = checkUserRateLimit(userId, 'upvote', 30, 10 * 60 * 1000);
+    if (!userLimit.allowed) {
+      set.status = 429;
+      return { error: 'Too many upvotes. Slow down.', retryAfter: userLimit.retryAfter };
+    }
+
+    // Validate report id is a UUID before touching the DB.
+    if (!UUID_RE.test(params.id)) {
+      set.status = 400;
+      return { success: false, error: 'Invalid report ID.' };
     }
 
     try {
-      await sql`INSERT INTO upvotes (report_id, user_id) VALUES (${params.id}, ${userId})`;
-      await sql`UPDATE reports SET upvotes = upvotes + 1 WHERE id = ${params.id}`;
+      // Atomic: only bump the counter if the upvote row was actually inserted.
+      // The unique constraint makes a duplicate INSERT throw → caught as 409.
+      await sql.begin(async (tx: any) => {
+        await tx`INSERT INTO upvotes (report_id, user_id) VALUES (${params.id}, ${userId})`;
+        await tx`UPDATE reports SET upvotes = upvotes + 1 WHERE id = ${params.id}`;
+      });
       return { success: true };
     } catch {
       set.status = 409;
@@ -479,9 +532,10 @@ const app = new Elysia({
     params: t.Object({
       id: t.String()
     }),
-    body: t.Object({
-      userId: t.String()
-    })
+    // body.userId kept optional for backward-compat with old clients but ignored.
+    body: t.Optional(t.Object({
+      userId: t.Optional(t.String())
+    }))
   })
 
   // ─── Verify Report ───────────────────────────
@@ -492,32 +546,106 @@ const app = new Elysia({
       return { error: 'Authentication required to verify reports' };
     }
 
-    const { userId, isValid } = body;
+    // SECURITY: verifier identity comes from the verified token, not the body.
+    const userId = auth.userId!;
+    const { isValid } = body;
 
     // Per-user rate limit: max 20 verifications per 10 minutes
-    if (auth.userId) {
-      const userLimit = checkUserRateLimit(auth.userId, 'verify_report', 20, 10 * 60 * 1000);
-      if (!userLimit.allowed) {
-        set.status = 429;
-        return { error: 'Too many verifications. Slow down.', retryAfter: userLimit.retryAfter };
-      }
+    const userLimit = checkUserRateLimit(userId, 'verify_report', 20, 10 * 60 * 1000);
+    if (!userLimit.allowed) {
+      set.status = 429;
+      return { error: 'Too many verifications. Slow down.', retryAfter: userLimit.retryAfter };
+    }
+
+    if (!UUID_RE.test(params.id)) {
+      set.status = 400;
+      return { success: false, error: 'Invalid report ID.' };
     }
 
     try {
-      await sql`INSERT INTO verifications (report_id, verifier_id, is_valid) VALUES (${params.id}, ${userId}, ${isValid})`;
-
-      if (isValid) {
-        await sql`UPDATE reports SET verification_count = verification_count + 1 WHERE id = ${params.id}`;
-        const [report] = await sql`SELECT verification_count FROM reports WHERE id = ${params.id}`;
-        if (report && report.verification_count >= 3) {
-          await sql`UPDATE reports SET status = 'open' WHERE id = ${params.id} AND status = 'pending_verification'`;
+      // All mutations for one vote happen atomically. Status transitions are
+      // COUNT-based and consensus-driven — a single vote can never resolve or
+      // reject a report on its own (the old code let one "invalid" vote mark
+      // ANY report resolved, a trivial censorship/vandalism vector).
+      // image_url values of any report that transitions to 'rejected' are
+      // collected here and cleaned up from Storj AFTER the tx commits (10A.6).
+      const imagesToDelete: string[] = [];
+      const outcome = await sql.begin(async (tx: any) => {
+        // Prevent self-verification of one's own report.
+        const [rpt] = await tx`SELECT creator_id, status FROM reports WHERE id = ${params.id}`;
+        if (!rpt) return { notFound: true };
+        if (rpt.creator_id && rpt.creator_id === userId) {
+          return { selfVote: true };
         }
-      } else {
-        await sql`UPDATE reports SET status = 'resolved' WHERE id = ${params.id}`;
+
+        // Record the vote. UNIQUE(report_id, verifier_id) blocks double voting.
+        await tx`
+          INSERT INTO verifications (report_id, verifier_id, is_valid)
+          VALUES (${params.id}, ${userId}, ${isValid})
+        `;
+
+        // Recount from the source of truth rather than trusting a cached counter.
+        const [counts] = await tx`
+          SELECT
+            COUNT(*) FILTER (WHERE is_valid) AS valid,
+            COUNT(*) FILTER (WHERE NOT is_valid) AS invalid
+          FROM verifications
+          WHERE report_id = ${params.id}
+        `;
+        const validCount = Number(counts.valid);
+        const invalidCount = Number(counts.invalid);
+
+        // Keep the denormalised counter in sync with real "valid" votes.
+        await tx`UPDATE reports SET verification_count = ${validCount} WHERE id = ${params.id}`;
+
+        // Consensus thresholds (require 3 concurring votes either way).
+        const CONSENSUS = 3;
+        if (validCount >= CONSENSUS) {
+          await tx`
+            UPDATE reports SET status = 'open'
+            WHERE id = ${params.id} AND status = 'pending_verification'
+          `;
+        } else if (invalidCount >= CONSENSUS) {
+          // Community judged the report invalid → reject (not "resolved").
+          // Capture the image_url before the status flip so we can clean up
+          // the Storj object after the transaction commits (10A.6).
+          const [rejected] = await tx`
+            UPDATE reports SET status = 'rejected'
+            WHERE id = ${params.id} AND status IN ('pending_verification', 'open')
+            RETURNING image_url
+          `;
+          if (rejected?.image_url) {
+            imagesToDelete.push(rejected.image_url);
+          }
+        }
+
+        // Credit the verifier by their Clerk ID (users.clerk_id, not users.id).
+        await tx`
+          UPDATE users
+          SET reports_verified = reports_verified + 1, trust_score = trust_score + 20
+          WHERE clerk_id = ${userId}
+        `;
+
+        return { validCount, invalidCount };
+      });
+
+      if ((outcome as any).notFound) {
+        set.status = 404;
+        return { success: false, error: 'Report not found' };
+      }
+      if ((outcome as any).selfVote) {
+        set.status = 403;
+        return { success: false, error: 'You cannot verify your own report.' };
       }
 
-      if (userId) {
-        await sql`UPDATE users SET reports_verified = reports_verified + 1, trust_score = trust_score + 20 WHERE id = ${userId}`;
+      // 10A.6: best-effort cleanup of rejected-report images from Storj. Done
+      // AFTER the transaction commits so a rolled-back vote never deletes an
+      // image for a report that wasn't actually rejected. Failures are logged
+      // but never fail the request — the row is already rejected.
+      for (const imgUrl of imagesToDelete) {
+        storage.deleteImage(imgUrl).catch((e) =>
+          logger.warn('Failed to delete rejected-report image', { error: String(e) }),
+        );
       }
 
       return { success: true };
@@ -530,141 +658,195 @@ const app = new Elysia({
       id: t.String()
     }),
     body: t.Object({
-      userId: t.String(),
+      // userId accepted for backward-compat but ignored; identity is from the token.
+      userId: t.Optional(t.String()),
       isValid: t.Boolean()
     })
   })
 
   // ─── Leaderboard: Citizens ───────────────────
-  .get('/api/leaderboard/citizens', async () => {
-    const users = await sql`
-      SELECT 
-        id, display_name, job_title, socials, avatar_url,
-        reports_published, reports_verified, integrations_helped,
-        (reports_published * 10 + reports_verified * 20 + integrations_helped * 50) AS civic_sense_score
-      FROM users
-      WHERE (reports_published * 10 + reports_verified * 20 + integrations_helped * 50) > 0
-      ORDER BY civic_sense_score DESC
-      LIMIT 50
-    `;
+  .get('/api/leaderboard/citizens', async ({ set, store }) => {
+    const reqId = (store as any).requestId;
+    try {
+      // 8.2: cache for 60s — this aggregate recomputes on every hit but changes
+      // slowly, so repeat requests within the TTL skip the SQL entirely.
+      const result = await withTtlCache('leaderboard:citizens', 60_000, async () => {
+        const users = await sql`
+          SELECT
+            id, display_name, job_title, socials, avatar_url,
+            reports_published, reports_verified, integrations_helped,
+            (reports_published * 10 + reports_verified * 20 + integrations_helped * 50) AS civic_sense_score
+          FROM users
+          WHERE (reports_published * 10 + reports_verified * 20 + integrations_helped * 50) > 0
+          ORDER BY civic_sense_score DESC
+          LIMIT 50
+        `;
 
-    return {
-      citizens: users.map((u: any, i: number) => ({
-        id: u.id,
-        name: u.display_name,
-        jobTitle: u.job_title,
-        socials: u.socials || {},
-        reportsPublished: u.reports_published,
-        reportsVerified: u.reports_verified,
-        integrationsHelped: u.integrations_helped,
-        civicSenseScore: u.civic_sense_score,
-        rank: i + 1,
-      })),
-    };
+        return {
+          citizens: users.map((u: any, i: number) => ({
+            id: u.id,
+            name: u.display_name,
+            jobTitle: u.job_title,
+            socials: u.socials || {},
+            reportsPublished: u.reports_published,
+            reportsVerified: u.reports_verified,
+            integrationsHelped: u.integrations_helped,
+            civicSenseScore: u.civic_sense_score,
+            rank: i + 1,
+          })),
+        };
+      });
+      return result;
+    } catch (err) {
+      logger.error('Failed to load citizen leaderboard', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load leaderboard', requestId: reqId };
+    }
   })
 
   // ─── Leaderboard: Wall of Shame ──────────────
-  .get('/api/leaderboard/shame', async () => {
-    const mlas = await sql`
-      SELECT
-        m.id,
-        m.name,
-        m.constituency AS ward,
-        m.city,
-        COUNT(CASE WHEN r.status = 'open' THEN 1 END) AS unresolved_count
-      FROM mlas m
-      LEFT JOIN reports r ON r.mla_name = m.name
-      GROUP BY m.id, m.name, m.constituency, m.city
-      ORDER BY unresolved_count DESC, m.name ASC
-      LIMIT 50
-    `;
+  .get('/api/leaderboard/shame', async ({ set, store }) => {
+    const reqId = (store as any).requestId;
+    try {
+      const result = await withTtlCache('leaderboard:shame', 60_000, async () => {
+        const mlas = await sql`
+          SELECT
+            m.id,
+            m.name,
+            m.constituency AS ward,
+            m.city,
+            COUNT(CASE WHEN r.status = 'open' THEN 1 END) AS unresolved_count
+          FROM mlas m
+          LEFT JOIN reports r ON r.mla_name = m.name
+          GROUP BY m.id, m.name, m.constituency, m.city
+          ORDER BY unresolved_count DESC, m.name ASC
+          LIMIT 50
+        `;
 
-    return {
-      mlas: mlas.map((m: any, i: number) => ({
-        id: m.id,
-        name: m.name,
-        ward: m.ward,
-        city: m.city,
-        unresolvedCount: Number(m.unresolved_count) || 0,
-        rank: i + 1,
-      })),
-    };
+        return {
+          mlas: mlas.map((m: any, i: number) => ({
+            id: m.id,
+            name: m.name,
+            ward: m.ward,
+            city: m.city,
+            unresolvedCount: Number(m.unresolved_count) || 0,
+            rank: i + 1,
+          })),
+        };
+      });
+      return result;
+    } catch (err) {
+      logger.error('Failed to load wall of shame', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load leaderboard', requestId: reqId };
+    }
   })
 
   // ─── Trending News ───────────────────────────
-  .get('/api/news/trending', async () => {
-    const news = await sql`
-      SELECT 
-        id, headline, url, source, snippet, is_tragic,
-        ST_Y(location::geometry) as latitude,
-        ST_X(location::geometry) as longitude,
-        published_at
-      FROM local_news
-      WHERE confidence_score >= 40
-      ORDER BY published_at DESC
-      LIMIT 20
-    `;
+  .get('/api/news/trending', async ({ set, store }) => {
+    const reqId = (store as any).requestId;
+    try {
+      const result = await withTtlCache('news:trending', 60_000, async () => {
+        const news = await sql`
+          SELECT
+            id, headline, url, source, snippet, is_tragic,
+            ST_Y(location::geometry) as latitude,
+            ST_X(location::geometry) as longitude,
+            published_at
+          FROM local_news
+          WHERE confidence_score >= 40
+          ORDER BY published_at DESC
+          LIMIT 20
+        `;
 
-    return {
-      news: news.map((n: any) => ({
-        id: n.id,
-        source: n.source,
-        title: n.headline,
-        url: n.url,
-        date: formatRelativeTime(n.published_at),
-        snippet: n.snippet,
-        isTragic: n.is_tragic,
-      })),
-    };
+        return {
+          news: news.map((n: any) => ({
+            id: n.id,
+            source: n.source,
+            title: n.headline,
+            url: n.url,
+            date: formatRelativeTime(n.published_at),
+            snippet: n.snippet,
+            isTragic: n.is_tragic,
+          })),
+        };
+      });
+      return result;
+    } catch (err) {
+      logger.error('Failed to load trending news', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load trending news', requestId: reqId };
+    }
   })
 
   // ─── All News ────────────────────────────────
-  .get('/api/news', async () => {
-    const news = await sql`
-      SELECT id, headline, url, source, snippet, is_tragic, city,
-        ST_Y(location::geometry) as latitude,
-        ST_X(location::geometry) as longitude,
-        published_at
-      FROM local_news
-      WHERE confidence_score >= 40
-      ORDER BY published_at DESC
-      LIMIT 50
-    `;
-    return {
-      news: news.map((n: any) => ({
-        id: n.id,
-        source: n.source,
-        title: n.headline,
-        url: n.url,
-        date: formatRelativeTime(n.published_at),
-        snippet: n.snippet,
-        isTragic: n.is_tragic,
-        city: n.city,
-        location: { lat: n.latitude, lng: n.longitude }
-      }))
-    };
+  .get('/api/news', async ({ set, store }) => {
+    const reqId = (store as any).requestId;
+    try {
+      const news = await sql`
+        SELECT id, headline, url, source, snippet, is_tragic, city,
+          ST_Y(location::geometry) as latitude,
+          ST_X(location::geometry) as longitude,
+          published_at
+        FROM local_news
+        WHERE confidence_score >= 40
+        ORDER BY published_at DESC
+        LIMIT 50
+      `;
+      return {
+        news: news.map((n: any) => ({
+          id: n.id,
+          source: n.source,
+          title: n.headline,
+          url: n.url,
+          date: formatRelativeTime(n.published_at),
+          snippet: n.snippet,
+          isTragic: n.is_tragic,
+          city: n.city,
+          location: { lat: n.latitude, lng: n.longitude }
+        }))
+      };
+    } catch (err) {
+      logger.error('Failed to load news', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load news', requestId: reqId };
+    }
   })
 
   // ─── Local News (Alias) ──────────────────────
-  .get('/api/local-news', async () => {
-    const news = await sql`
-      SELECT id, headline, url, source, snippet, city, published_at
-      FROM local_news
-      WHERE confidence_score >= 40
-      ORDER BY published_at DESC
-      LIMIT 50
-    `;
-    return { news };
+  .get('/api/local-news', async ({ set, store }) => {
+    const reqId = (store as any).requestId;
+    try {
+      const news = await sql`
+        SELECT id, headline, url, source, snippet, city, published_at
+        FROM local_news
+        WHERE confidence_score >= 40
+        ORDER BY published_at DESC
+        LIMIT 50
+      `;
+      return { news };
+    } catch (err) {
+      logger.error('Failed to load local news', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load local news', requestId: reqId };
+    }
   })
 
   // ─── MLAs ────────────────────────────────────
-  .get('/api/mlas', async () => {
-    const mlas = await sql`
-      SELECT id, name, party, constituency, city, state, contact, email, is_incorrect, latitude, longitude
-      FROM mlas
-      ORDER BY city, name
-    `;
-    return { mlas };
+  .get('/api/mlas', async ({ set, store }) => {
+    const reqId = (store as any).requestId;
+    try {
+      const mlas = await sql`
+        SELECT id, name, party, constituency, city, state, contact, email, is_incorrect, latitude, longitude
+        FROM mlas
+        ORDER BY city, name
+      `;
+      return { mlas };
+    } catch (err) {
+      logger.error('Failed to load MLAs', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load MLAs', requestId: reqId };
+    }
   })
 
   .post('/api/mlas/:id/flag', async ({ params, set, request }) => {
@@ -674,7 +856,19 @@ const app = new Elysia({
       return { error: 'Authentication required to flag MLA details' };
     }
 
+    // Per-user rate limit: cap flagging to curb abuse/mass-flagging.
+    const flagLimit = checkUserRateLimit(auth.userId!, 'flag_mla', 20, 10 * 60 * 1000);
+    if (!flagLimit.allowed) {
+      set.status = 429;
+      return { error: 'Too many flags. Slow down.', retryAfter: flagLimit.retryAfter };
+    }
+
     const { id } = params;
+    // mlas.id is an integer (SERIAL); reject non-numeric ids before querying.
+    if (!/^\d+$/.test(id)) {
+      set.status = 400;
+      return { error: 'Invalid MLA id.' };
+    }
     const [mla] = await sql`
       SELECT id, is_incorrect FROM mlas WHERE id = ${id}
     `;
@@ -697,12 +891,20 @@ const app = new Elysia({
       return { error: 'Authentication required to flag MLA details' };
     }
 
-    const { name, constituency } = body as any;
-    if (!name) {
-      set.status = 400;
-      return { error: 'MLA name is required' };
+    // Per-user rate limit: this endpoint can CREATE placeholder MLA rows, so it
+    // is a data-pollution vector without a cap.
+    const flagLimit = checkUserRateLimit(auth.userId!, 'flag_mla', 20, 10 * 60 * 1000);
+    if (!flagLimit.allowed) {
+      set.status = 429;
+      return { error: 'Too many flags. Slow down.', retryAfter: flagLimit.retryAfter };
     }
-    
+
+    const { name, constituency } = body as any;
+    if (!name || typeof name !== 'string' || name.trim().length < 2 || name.length > 100) {
+      set.status = 400;
+      return { error: 'A valid MLA name (2-100 chars) is required' };
+    }
+
     let mla;
     if (constituency) {
       [mla] = await sql`
@@ -732,7 +934,8 @@ const app = new Elysia({
     return { success: true, message: 'MLA details flagged as incorrect', mlaId: mla.id };
   })
 
-  .get('/api/users/volunteers/constituency/:constituency', async ({ params, set, request }) => {
+  .get('/api/users/volunteers/constituency/:constituency', async ({ params, set, request, store }) => {
+    const reqId = (store as any).requestId;
     // Auth: Require authenticated user to view volunteer PII
     const auth = await verifyAuth(request);
     if (!requireAuth(auth, set)) {
@@ -740,15 +943,25 @@ const app = new Elysia({
     }
 
     const { constituency } = params;
-    // Only expose non-PII fields to other authenticated users
-    const volunteers = await sql`
-      SELECT display_name, job_title
-      FROM users
-      WHERE home_constituency = ${constituency}
-      ORDER BY created_at ASC
-      LIMIT 5
-    `;
-    return { volunteers };
+    try {
+      // Only expose non-PII fields to other authenticated users. These stat
+      // columns are already public via the citizen leaderboard; the referral
+      // modal needs them to compute each volunteer's points/level (otherwise
+      // everyone renders as "0 Pts" with the lowest badge and undefined keys).
+      const volunteers = await sql`
+        SELECT id, display_name, job_title, avatar_url,
+               reports_published, reports_verified, integrations_helped
+        FROM users
+        WHERE home_constituency = ${constituency}
+        ORDER BY created_at ASC
+        LIMIT 5
+      `;
+      return { volunteers };
+    } catch (err) {
+      logger.error('Failed to load volunteers', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load volunteers', requestId: reqId };
+    }
   })
 
   // ─── Enhanced News Scraper Trigger (ADMIN) ───
@@ -792,7 +1005,11 @@ const app = new Elysia({
       return { error: 'Authentication required to submit volunteer data' };
     }
 
-    const { type, data, submittedBy, submitterEmail } = body;
+    const { type, data, submitterEmail } = body;
+    // SECURITY: attribute the submission to the verified token subject, not a
+    // client-supplied submittedBy (which fed the anti-spam rate limiter and the
+    // points system — spoofable to frame others or dodge limits).
+    const submittedBy = auth.userId!;
 
     try {
       const result = await submitVolunteerData({ type, data, submittedBy, submitterEmail });
@@ -805,21 +1022,29 @@ const app = new Elysia({
     body: t.Object({
       type: t.String(),
       data: t.Any(),
-      submittedBy: t.String(),
+      // submittedBy accepted for backward-compat but ignored; from the token.
+      submittedBy: t.Optional(t.String()),
       submitterEmail: t.Optional(t.Union([t.String(), t.Null()]))
     })
   })
 
   // ─── Volunteer System: Get Pending ────────────
-  .get('/api/volunteer/pending', async ({ set, request }) => {
+  .get('/api/volunteer/pending', async ({ set, request, store }) => {
+    const reqId = (store as any).requestId;
     // Auth: Require authenticated user to see pending queue
     const auth = await verifyAuth(request);
     if (!requireAuth(auth, set)) {
       return { error: 'Authentication required to view pending submissions' };
     }
 
-    const pending = await getPendingSubmissions(50);
-    return { submissions: pending };
+    try {
+      const pending = await getPendingSubmissions(50);
+      return { submissions: pending };
+    } catch (err) {
+      logger.error('Failed to load pending submissions', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load pending submissions', requestId: reqId };
+    }
   })
 
   // ─── Volunteer System: Verify Submission ──────
@@ -859,7 +1084,11 @@ const app = new Elysia({
       return { error: 'Authentication required' };
     }
 
-    const { clerkId, displayName, avatarUrl, email } = body;
+    // SECURITY: bind the synced row to the verified token subject, not a body
+    // field. Trusting body.clerkId let an authenticated user create/overwrite
+    // the profile row of any other Clerk ID.
+    const clerkId = auth.userId!;
+    const { displayName, avatarUrl, email } = body;
 
     const safeName = (displayName || 'Citizen Hero').replace(/<[^>]*>/g, '').slice(0, 50);
 
@@ -877,7 +1106,8 @@ const app = new Elysia({
     return { success: true, user };
   }, {
     body: t.Object({
-      clerkId: t.String(),
+      // clerkId accepted for backward-compat but ignored; identity is from the token.
+      clerkId: t.Optional(t.String()),
       displayName: t.Optional(t.Union([t.String(), t.Null()])),
       avatarUrl: t.Optional(t.Union([t.String(), t.Null()])),
       email: t.Optional(t.Union([t.String(), t.Null()]))
@@ -885,33 +1115,41 @@ const app = new Elysia({
   })
 
   // ─── Get User by Clerk ID ────────────────────
-  .get('/api/users/clerk/:clerkId', async ({ params, set, request }) => {
+  .get('/api/users/clerk/:clerkId', async ({ params, set, request, store }) => {
+    const reqId = (store as any).requestId;
     // SECURITY: Require auth to prevent PII enumeration
     const auth = await verifyAuth(request);
     if (!requireAuth(auth, set)) {
       return { error: 'Authentication required to view user profiles' };
     }
 
-    const [user] = await sql`
-      SELECT 
-        id, clerk_id, display_name, job_title, socials, avatar_url,
-        reports_published, reports_verified, integrations_helped,
-        (reports_published * 10 + reports_verified * 20 + integrations_helped * 50) AS civic_sense_score,
-        home_constituency, home_city, home_state,
-        created_at
-      FROM users WHERE clerk_id = ${params.clerkId}
-    `;
+    try {
+      const [user] = await sql`
+        SELECT
+          id, clerk_id, display_name, job_title, socials, avatar_url,
+          reports_published, reports_verified, integrations_helped,
+          (reports_published * 10 + reports_verified * 20 + integrations_helped * 50) AS civic_sense_score,
+          home_constituency, home_city, home_state,
+          created_at
+        FROM users WHERE clerk_id = ${params.clerkId}
+      `;
 
-    if (!user) { set.status = 404; return { error: 'User not found' }; }
+      if (!user) { set.status = 404; return { error: 'User not found' }; }
 
-    // Only expose PII (email, home_*) to the user themselves
-    const isOwner = auth.userId === params.clerkId;
-    if (!isOwner) {
-      // Strip sensitive fields for non-owners
-      const { email, ...safeUser } = user as any;
-      return { user: safeUser };
+      // Only expose PII (email + home location) to the user themselves.
+      const isOwner = auth.userId === params.clerkId;
+      if (!isOwner) {
+        // Strip email AND home_* location fields for non-owners — leaking a
+        // citizen's home constituency/city/state is a real-world safety issue.
+        const { email, home_constituency, home_city, home_state, ...safeUser } = user as any;
+        return { user: safeUser };
+      }
+      return { user };
+    } catch (err) {
+      logger.error('Failed to load user profile', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load user profile', requestId: reqId };
     }
-    return { user };
   })
 
   // ─── Update User by Clerk ID ─────────────────
@@ -927,7 +1165,10 @@ const app = new Elysia({
     await sql`
       UPDATE users SET
         job_title = COALESCE(${jobTitle ? jobTitle.replace(/<[^>]*>/g, '').slice(0, 50) : null}, job_title),
-        socials = COALESCE(${JSON.stringify(socials || null)}, socials),
+        -- Only stringify when socials is actually provided. JSON.stringify(null)
+        -- yields the jsonb value 'null' (NOT SQL NULL), which defeats COALESCE
+        -- and silently wipes a user's saved socials on any update that omits it.
+        socials = COALESCE(${socials ? JSON.stringify(socials) : null}, socials),
         home_constituency = COALESCE(${homeConstituency || null}, home_constituency),
         home_city = COALESCE(${homeCity || null}, home_city),
         home_state = COALESCE(${homeState || null}, home_state)
@@ -937,85 +1178,46 @@ const app = new Elysia({
     return { success: true };
   })
 
-  // ─── User Profile CRUD (legacy UUID-based) ──
-  .post('/api/users', async ({ body, set, request }) => {
-    // SECURITY: Require authenticated user (prevents mass fake account creation)
-    const auth = await verifyAuth(request);
-    if (!requireAuth(auth, set)) {
-      return { error: 'Authentication required to create user profile' };
-    }
-
-    const { displayName, jobTitle, socials } = body as any;
-
-    const safeName = (displayName || 'Citizen Hero').replace(/<[^>]*>/g, '').slice(0, 50);
-    const safeJob = jobTitle ? jobTitle.replace(/<[^>]*>/g, '').slice(0, 50) : null;
-
-    const [user] = await sql`
-      INSERT INTO users (display_name, job_title, socials)
-      VALUES (${safeName}, ${safeJob}, ${JSON.stringify(socials || {})})
-      RETURNING id, display_name, trust_score
-    `;
-
-    return { success: true, user };
-  })
-
-  .put('/api/users/:id', async ({ params, body, set, request }) => {
-    // Auth: Require authenticated user for profile updates
-    const auth = await verifyAuth(request);
-    if (!requireAuth(auth, set)) {
-      return { error: 'Authentication required to update profile' };
-    }
-
-    const { displayName, jobTitle, socials, avatarUrl } = body as any;
-
-    // Validate UUID format
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.id)) {
-      set.status = 400;
-      return { error: 'Invalid user ID format.' };
-    }
-
-    await sql`
-      UPDATE users SET
-        display_name = COALESCE(${displayName ? displayName.replace(/<[^>]*>/g, '').slice(0, 50) : null}, display_name),
-        job_title = COALESCE(${jobTitle ? jobTitle.replace(/<[^>]*>/g, '').slice(0, 50) : null}, job_title),
-        socials = COALESCE(${JSON.stringify(socials || null)}, socials),
-        avatar_url = COALESCE(${avatarUrl || null}, avatar_url)
-      WHERE id = ${params.id}
-    `;
-
-    return { success: true };
-  })
-
-  .get('/api/users/:id', async ({ params, set }) => {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.id)) {
-      set.status = 400;
-      return { error: 'Invalid user ID format.' };
-    }
-
-    const [user] = await sql`
-      SELECT 
-        id, display_name, job_title, socials, avatar_url,
-        reports_published, reports_verified, integrations_helped,
-        (reports_published * 10 + reports_verified * 20 + integrations_helped * 50) AS civic_sense_score,
-        created_at
-      FROM users WHERE id = ${params.id}
-    `;
-
-    if (!user) { set.status = 404; return { error: 'User not found' }; }
-    return { user };
-  })
+  // NOTE: The legacy UUID-based user routes (POST /api/users, PUT /api/users/:id,
+  // GET /api/users/:id) were removed. They allowed IDOR — any authenticated user
+  // could overwrite any profile by UUID since there was no ownership check, and
+  // there is no safe mapping from a Clerk token to an arbitrary internal UUID.
+  // All profile access now goes through the Clerk-scoped routes above
+  // (GET/PUT /api/users/clerk/:clerkId), which enforce ownership.
 
   // ─── Global error handler ────────────────────
-  .onError(({ error, set }) => {
-    console.error('[API Error]', error);
+  .onError(({ error, set, store }) => {
+    const reqId = (store as any)?.requestId;
+    logger.error('Unhandled API error', { error: String(error), requestId: reqId });
     set.status = 500;
-    return { error: 'Internal server error' };
+    return { error: 'Internal server error', requestId: reqId };
   })
 
   // ─── Start Server ────────────────────────────
-  .listen({ port: process.env.PORT ? parseInt(process.env.PORT, 10) : 6969, hostname: '0.0.0.0' });
+  .listen({ port: env.PORT, hostname: '0.0.0.0' });
 
-console.log(`🟢 FixIndia.org API running at http://0.0.0.0:${app.server?.port}`);
+logger.info('FixIndia.org API running', { port: app.server?.port });
+
+// ─── Graceful shutdown ─────────────────────────
+// On SIGTERM/SIGINT (e.g. PM2 reload), stop accepting new connections, drain
+// the DB pool, then exit cleanly so in-flight requests finish and connections
+// are not leaked.
+async function shutdown(signal: string) {
+  logger.info('Shutting down public API', { signal });
+  try {
+    app.stop();
+  } catch (e) {
+    logger.warn('Error stopping server', { error: String(e) });
+  }
+  try {
+    await sql.end({ timeout: 5 });
+  } catch (e) {
+    logger.warn('Error closing DB pool', { error: String(e) });
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ═══════════════════════════════════════════════
 // SCHEDULED SCRAPING (OFF-PEAK HOURS: 3 AM - 8 AM IST)
@@ -1023,41 +1225,42 @@ console.log(`🟢 FixIndia.org API running at http://0.0.0.0:${app.server?.port}
 
 // ─── Enhanced News Scraper: 3 AM, 5 AM, 7 AM ───
 cron.schedule(SCRAPING_SCHEDULE.news.cron, async () => {
-  console.log(`[Cron] ${SCRAPING_SCHEDULE.news.description}`);
+  logger.info(`[Cron] ${SCRAPING_SCHEDULE.news.description}`);
   try {
     const count = await runEnhancedNewsScraper();
-    console.log(`[Cron] ✓ Enhanced news scraper: ${count} articles`);
+    logger.info('[Cron] Enhanced news scraper done', { count });
   } catch (e) {
-    console.error('[Cron] Enhanced news scraper failed:', e);
+    logger.error('[Cron] Enhanced news scraper failed', { error: String(e) });
   }
 });
 
 // ─── Multi-City MLA Scraper: 4 AM every Sunday ───
 cron.schedule(SCRAPING_SCHEDULE.mla.cron, async () => {
-  console.log(`[Cron] ${SCRAPING_SCHEDULE.mla.description}`);
+  logger.info(`[Cron] ${SCRAPING_SCHEDULE.mla.description}`);
   try {
     const count = await runMultiCityMLAScraper();
-    console.log(`[Cron] ✓ Multi-city MLA scraper: ${count} MLAs`);
+    logger.info('[Cron] Multi-city MLA scraper done', { count });
   } catch (e) {
-    console.error('[Cron] Multi-city MLA scraper failed:', e);
+    logger.error('[Cron] Multi-city MLA scraper failed', { error: String(e) });
   }
 });
 
 // ─── Government Projects: 6 AM every Monday ───
 cron.schedule(SCRAPING_SCHEDULE.government.cron, async () => {
-  console.log(`[Cron] ${SCRAPING_SCHEDULE.government.description}`);
+  logger.info(`[Cron] ${SCRAPING_SCHEDULE.government.description}`);
   try {
     const count = await runProjectScraper();
-    console.log(`[Cron] ✓ Government projects scraper: ${count} projects`);
+    logger.info('[Cron] Government projects scraper done', { count });
   } catch (e) {
-    console.error('[Cron] Government projects scraper failed:', e);
+    logger.error('[Cron] Government projects scraper failed', { error: String(e) });
   }
 });
 
-console.log('📅 Scheduled scrapers configured:');
-console.log(`   - News: ${SCRAPING_SCHEDULE.news.cron} (3 AM, 5 AM, 7 AM IST)`);
-console.log(`   - MLAs: ${SCRAPING_SCHEDULE.mla.cron} (4 AM Sunday)`);
-console.log(`   - Projects: ${SCRAPING_SCHEDULE.government.cron} (6 AM Monday)`);
+logger.info('Scheduled scrapers configured', {
+  news: SCRAPING_SCHEDULE.news.cron,
+  mlas: SCRAPING_SCHEDULE.mla.cron,
+  projects: SCRAPING_SCHEDULE.government.cron,
+});
 
 // Helper: Smart relative time formatting
 function formatRelativeTime(date: string | Date): string {

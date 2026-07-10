@@ -1,5 +1,7 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { createPublicKey, verify, timingSafeEqual } from 'crypto';
+import { logger } from './lib/logger';
+import { env } from './config';
 
 interface JWK {
   kty: string;
@@ -16,37 +18,75 @@ interface JWKS {
 let cachedKeys: Record<string, any> = {};
 let keysFetchedAt = 0;
 
-// Fetch JWKS from Cloudflare and cache them in memory for 1 hour to prevent flooding Cloudflare certs endpoint
+// Fetch a URL with a hard timeout so a slow/missing JWKS endpoint can never
+// hang an admin request (10B.7). Resolves to the Response or rejects on timeout.
+function fetchWithTimeout(url: string, ms: number): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('JWKS fetch timed out')), ms);
+    fetch(url)
+      .then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
+// Fetch Cloudflare JWKS from the given team domain. Bounded retry (10B.7): up
+// to 2 attempts with a short backoff, each with a 3s hard timeout. Caches keys
+// for 1 hour to avoid hammering Cloudflare's certs endpoint.
 async function getCloudflarePublicKey(teamDomain: string, kid: string): Promise<any> {
   const now = Date.now();
   if (cachedKeys[kid] && now - keysFetchedAt < 3600000) {
     return cachedKeys[kid];
   }
 
-  try {
-    const url = `https://${teamDomain}.cloudflareaccess.com/cdn-cgi/access/certs`;
-    console.log(`[Admin Auth] Fetching Cloudflare JWKS from ${url}`);
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-    
-    const jwks = await res.json() as JWKS;
-    const newKeys: Record<string, any> = {};
-    for (const key of jwks.keys) {
-      const pubKey = createPublicKey({ key, format: 'jwk' });
-      newKeys[key.kid] = pubKey;
+  const url = `https://${teamDomain}.cloudflareaccess.com/cdn-cgi/access/certs`;
+  const MAX_ATTEMPTS = 2;
+  let lastErr: unknown;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      if (attempt > 1) logger.warn('[Admin Auth] Retrying JWKS fetch', { attempt });
+      const res = await fetchWithTimeout(url, 3000);
+      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+
+      const jwks = await res.json() as JWKS;
+      const newKeys: Record<string, any> = {};
+      for (const key of jwks.keys) {
+        // 10B.7: Cloudflare issues RSA keys (kty "RSA", alg "RS256"). Reject
+        // anything unexpected so a malformed/attacker-controlled JWKS can't
+        // smuggle in a non-RSA key that the verifier might mis-handle.
+        if (key.kty !== 'RSA' || (key.alg && key.alg !== 'RS256')) {
+          logger.warn('[Admin Auth] Skipping unexpected JWK', { kty: key.kty, alg: key.alg });
+          continue;
+        }
+        const pubKey = createPublicKey({ key, format: 'jwk' });
+        newKeys[key.kid] = pubKey;
+      }
+
+      cachedKeys = newKeys;
+      keysFetchedAt = now;
+
+      if (!cachedKeys[kid]) {
+        throw new Error(`Key ID ${kid} not found in JWKS`);
+      }
+      return cachedKeys[kid];
+    } catch (err) {
+      lastErr = err;
+      // Brief backoff before the single retry.
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, 250 * attempt));
+      }
     }
-    
-    cachedKeys = newKeys;
-    keysFetchedAt = now;
-    
-    if (!cachedKeys[kid]) {
-      throw new Error(`Key ID ${kid} not found in JWKS`);
-    }
-    return cachedKeys[kid];
-  } catch (err) {
-    console.error('[Admin Auth] Failed to fetch or import Cloudflare keys:', err);
-    throw err;
   }
+
+  // Fail closed: a slow/failed JWKS endpoint denies access rather than hanging.
+  logger.error('[Admin Auth] Failed to fetch or import Cloudflare keys', { error: String(lastErr) });
+  throw lastErr instanceof Error ? lastErr : new Error('JWKS fetch failed');
 }
 
 export interface AdminAuthResult {
@@ -58,8 +98,8 @@ export interface AdminAuthResult {
 export async function verifyAdminAuth(request: Request): Promise<AdminAuthResult> {
   // 1. Cloudflare Access JWT Assertion Header
   const cfJwt = request.headers.get('cf-access-jwt-assertion');
-  const teamDomain = process.env.CLOUDFLARE_TEAM_DOMAIN;
-  const aud = process.env.CLOUDFLARE_AUD;
+  const teamDomain = env.CLOUDFLARE_TEAM_DOMAIN;
+  const aud = env.CLOUDFLARE_AUD;
 
   if (cfJwt && teamDomain && aud) {
     try {
@@ -111,14 +151,14 @@ export async function verifyAdminAuth(request: Request): Promise<AdminAuthResult
 
       return { authenticated: true, email: payload.email };
     } catch (err: any) {
-      console.error('[Admin Auth] Verification error:', err);
-      return { authenticated: false, error: `JWT validation error: ${err.message}` };
+      logger.error('[Admin Auth] Verification error', { error: String(err) });
+      return { authenticated: false, error: `JWT validation error: ${err instanceof Error ? err.message : String(err)}` };
     }
   }
 
   // 2. Local/Direct Admin Key Header Fallback (for local testing/setup)
   const adminKeyHeader = request.headers.get('x-admin-key');
-  const ADMIN_KEY = process.env.ADMIN_KEY;
+  const ADMIN_KEY = env.ADMIN_KEY;
 
   if (ADMIN_KEY && adminKeyHeader) {
     const aBuf = Buffer.from(adminKeyHeader);
@@ -133,8 +173,8 @@ export async function verifyAdminAuth(request: Request): Promise<AdminAuthResult
   }
 
   // SECURITY: Never allow pass-through — always require authentication
-  if (process.env.NODE_ENV !== 'production' && !ADMIN_KEY && !teamDomain) {
-    console.warn('[Admin Auth] WARNING: No ADMIN_KEY or Cloudflare Access configured. Admin access denied.');
+  if (!env.isProduction && !ADMIN_KEY && !teamDomain) {
+    logger.warn('[Admin Auth] WARNING: No ADMIN_KEY or Cloudflare Access configured. Admin access denied.');
   }
 
   return { authenticated: false, error: 'Missing Cloudflare Access JWT or Admin Key' };

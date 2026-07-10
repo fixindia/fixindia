@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import Parser from 'rss-parser';
 import * as cheerio from 'cheerio';
 import { queryLLM } from './llm';
@@ -126,12 +126,26 @@ async function geocodeArticle(article: NewsArticle): Promise<GeocodedArticle | n
     // Skip non-infrastructure stories
     if (parsed.is_infrastructure === false || parsed.confidence < 30) return null;
 
+    // ACCURACY: Do not fabricate coordinates. The old code defaulted any article
+    // with missing lat/lng to Bengaluru city center, dropping unrelated stories
+    // (Delhi, Mumbai, …) onto Karnataka. If the model can't produce a valid
+    // in-India coordinate, skip the article rather than mislocate it.
+    const lat = typeof parsed.lat === 'number' ? parsed.lat : NaN;
+    const lng = typeof parsed.lng === 'number' ? parsed.lng : NaN;
+    const validCoords =
+      Number.isFinite(lat) && Number.isFinite(lng) &&
+      lat >= 6 && lat <= 37 && lng >= 68 && lng <= 98; // India bounding box
+    if (!validCoords) {
+      console.warn(`[Geocode] Dropping "${article.headline.slice(0, 60)}" — no valid coordinates.`);
+      return null;
+    }
+
     return {
       ...article,
       city: parsed.city || 'Unknown',
       neighborhood: parsed.neighborhood || '',
-      lat: typeof parsed.lat === 'number' ? parsed.lat : 12.9716,
-      lng: typeof parsed.lng === 'number' ? parsed.lng : 77.5946,
+      lat,
+      lng,
       is_tragic: !!parsed.is_tragic,
       snippet: parsed.snippet || article.snippet,
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
@@ -164,7 +178,9 @@ export async function runEnhancedNewsScraper(): Promise<number> {
   // Geocode through AI (with rate limiting)
   let inserted = 0;
   for (const article of filtered.slice(0, 30)) {
-    // Check if URL already exists
+    // Cost gate: skip the expensive LLM geocode for articles already in the DB.
+    // (Race-safety does NOT rely on this check — the INSERT below uses
+    // ON CONFLICT (url) DO NOTHING, so a concurrent run can't double-insert.)
     const existing = await sql`SELECT id FROM local_news WHERE url = ${article.url}`;
     if (existing.length > 0) continue;
 
@@ -172,6 +188,9 @@ export async function runEnhancedNewsScraper(): Promise<number> {
     if (!geocoded || geocoded.confidence < 30) continue;
 
     try {
+      // Race-safe idempotent insert (9.2): local_news.url is UNIQUE, so a
+      // concurrent run can't double-insert the same article. ON CONFLICT DO
+      // NOTHING means re-running the scraper never duplicates rows.
       await sql`
         INSERT INTO local_news (
           headline, url, source, snippet, location,
@@ -188,6 +207,7 @@ export async function runEnhancedNewsScraper(): Promise<number> {
           ${geocoded.publishedAt || new Date()},
           ${geocoded.city}
         )
+        ON CONFLICT (url) DO NOTHING
       `;
       inserted++;
       console.log(`[Scraper] ✓ ${geocoded.city}: "${geocoded.headline.slice(0, 60)}..." (${geocoded.confidence})`);

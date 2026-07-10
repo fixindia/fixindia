@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import sql from './db';
 
 interface AIModel {
@@ -116,6 +116,11 @@ export async function queryLLM(prompt: string, systemPrompt?: string): Promise<s
       const res = await fetch(endpoint, {
         method: 'POST',
         headers,
+        // Bound the request so a provider that accepts the connection but never
+        // responds can't hang the scraper run (and any admin trigger) forever.
+        // Matches the RSS scrapers' explicit timeouts; on timeout the per-model
+        // try/catch falls through to the next provider.
+        signal: AbortSignal.timeout(20000),
         body: JSON.stringify({
           model: model.model_string,
           messages: [

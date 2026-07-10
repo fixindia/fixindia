@@ -1,0 +1,27 @@
+# Local development database for FixIndia.
+# Start a local PostgreSQL + PostGIS so contributors don't need a system install:
+#   docker compose up -d
+# Then point the backend at it:
+#   DATABASE_URL=postgresql://fixindia:fixindia_dev@localhost:5432/fixindia
+# (apply server/schema.sql once: psql "$DATABASE_URL" -f server/schema.sql)
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: fixindia-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fixindia
+      POSTGRES_PASSWORD: fixindia_dev
+      POSTGRES_DB: fixindia
+    ports:
+      - "5432:5432"
+    volumes:
+      - fixindia-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fixindia -d fixindia"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  fixindia-db-data:

@@ -1,11 +1,11 @@
 import postgres from 'postgres';
+import { env } from './config';
 
-const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
+if (!env.DATABASE_URL) {
   throw new Error('DATABASE_URL environment variable is not set');
 }
 
-const sql = postgres(DATABASE_URL, {
+const sql = postgres(env.DATABASE_URL, {
   max: 20, // Increased for better concurrency
   idle_timeout: 300, // 5 minutes
   connect_timeout: 10,

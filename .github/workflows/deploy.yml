@@ -37,7 +37,7 @@ jobs:
 
   deploy-backend:
     runs-on: ubuntu-latest
-    name: Deploy Backend (AWS VPS)
+    name: Deploy Backend (VPS)
     steps:
       - name: SSH into server and deploy
         uses: appleboy/ssh-action@master
@@ -50,9 +50,10 @@ jobs:
             cd ~/fixindia/server
             git fetch --all
             git reset --hard origin/main
-            bun install
-            pkill -f 'bun run src/index.ts' || true
-            nohup bun run src/index.ts > server.log 2>&1 &
-            sleep 2
-            ps aux | grep "[b]un run src/index.ts"
+            bun install --production
+            # Run the server's own deploy script: it installs PM2 if needed,
+            # starts BOTH the public (fixindia-api) and admin (fixindia-admin-api)
+            # processes from ecosystem.config.json, and runs a readiness check.
+            chmod +x deploy.sh
+            ./deploy.sh
 

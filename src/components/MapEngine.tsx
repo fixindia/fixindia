@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useRef, useCallback, memo, useState } from 'react';
 import type { MapRef, MapLayerMouseEvent } from 'react-map-gl/maplibre';
 import Map, { Marker, Source, Layer } from 'react-map-gl/maplibre';
@@ -13,6 +13,7 @@ interface MapEngineProps {
   mlas?: any[];
   onMlaMarkerTap?: (mla: any) => void;
   activeMlaId?: number | null;
+  userLocation?: [number, number] | null;
 }
 
 const CITY_COORDS: Record<string, [number, number]> = {
@@ -49,7 +50,7 @@ const getFallbackCoords = (city?: string, _state?: string, index: number = 0): [
   ];
 };
 
-const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId, mlas, onMlaMarkerTap, activeMlaId }: MapEngineProps) {
+const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId, mlas, onMlaMarkerTap, activeMlaId, userLocation }: MapEngineProps) {
   const mapRef = useRef<MapRef>(null);
   const [hasLocated, setHasLocated] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<{ x: number, y: number, feature: any } | null>(null);
@@ -88,6 +89,17 @@ const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId, 
 
   // Track previous issue to know when user hits "Back to Map"
   const prevIssueId = useRef(activeIssueId);
+
+  useEffect(() => {
+    if (userLocation && mapRef.current) {
+      mapRef.current.flyTo({
+        center: [userLocation[1], userLocation[0]],
+        zoom: 13.5,
+        essential: true,
+        duration: 2000
+      });
+    }
+  }, [userLocation]);
 
   useEffect(() => {
     // If transitioning from an active issue back to null (cleared selection)

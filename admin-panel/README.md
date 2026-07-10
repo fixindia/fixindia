@@ -1,4 +1,36 @@
-# React + TypeScript + Vite
+# FixIndia Admin Panel
+
+The operator-facing SPA for the FixIndia admin API (`md.enjoyxd.eu.org` in
+production). Talks only to the admin API on port 6970.
+
+## Authentication
+
+The admin API accepts **either** of two credentials (see
+`server/src/admin_auth.ts`):
+
+1. **Cloudflare Access JWT** (preferred in production) — sent automatically by
+   the browser via the `cf-access-jwt-assertion` header once the operator has
+   authenticated through the Cloudflare Access login in front of
+   `md.enjoyxd.eu.org`. No long-lived secret sits in the browser.
+2. **`X-Admin-Key` header** (break-glass / local use) — a shared bearer secret.
+
+### Admin key is never persisted
+
+The admin key is held **in memory only** (React state) for the duration of the
+session. It is **never** written to `localStorage`, so:
+
+- an XSS in the panel cannot exfiltrate a persisted key, and
+- the key is not left behind on a shared machine.
+
+The key must be re-entered on every reload. Only the API URL (not a secret) is
+persisted to `localStorage` for convenience.
+
+For production, prefer Cloudflare Access so the key path is not needed at all.
+
+## Development
+
+This is a React + TypeScript + Vite app. See the Vite template notes below for
+lint/type-checking configuration details.
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 

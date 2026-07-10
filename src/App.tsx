@@ -1,7 +1,17 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useUser, useAuth } from './lib/auth-provider';
-import MapEngine from './components/MapEngine';
+// 7.3: code-split the map bundle. maplibre-gl alone is ~1 MB; lazy-loading it
+// means first paint no longer ships the whole map for users who never scroll to
+// it. A lightweight placeholder renders while the chunk downloads.
+const MapEngine = lazy(() => import('./components/MapEngine'));
+function MapPlaceholder() {
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-[#050505] text-white/30 text-sm">
+      Loading map…
+    </div>
+  );
+}
 import BottomSheet from './components/BottomSheet';
 import ReportModal from './components/ReportModal';
 import type { Issue, IssueCategory, VolunteerProfile, MLA } from './types';
@@ -19,7 +29,7 @@ import { api } from './lib/api';
 import { 
   Newspaper, User, Menu, Shield, Sliders, Locate, LogOut, 
   Compass, Users, Check, X, Loader2, AlertTriangle, 
-  CheckCircle, UserCheck, RefreshCw
+  CheckCircle, UserCheck, RefreshCw, MapPin
 } from 'lucide-react';
 import { getVolunteerLevel } from './lib/levels';
 
@@ -177,7 +187,8 @@ function App() {
     if (isVolunteerPortal && isSignedIn && user) {
       const getProfile = async () => {
         try {
-          const res = await api.getUserByClerkId(user.id);
+          const token = await getToken();
+          const res = await api.getUserByClerkId(user.id, token);
           if (res && res.user) {
             setVolunteerProfile(res.user);
           }
@@ -187,7 +198,7 @@ function App() {
       };
       getProfile();
     }
-  }, [isVolunteerPortal, isSignedIn, user]);
+  }, [isVolunteerPortal, isSignedIn, user, getToken]);
 
   // Auto-select target MLA when arriving from redirection links
   useEffect(() => {
@@ -241,7 +252,7 @@ function App() {
           }, token);
           
           if (isVolunteerPortal) {
-            const res = await api.getUserByClerkId(user.id);
+            const res = await api.getUserByClerkId(user.id, token);
             if (res && res.user) {
               setVolunteerProfile(res.user);
             }
@@ -316,27 +327,10 @@ function App() {
     );
   };
 
-  // Helper to check if an MLA needs verification / correction
-  const isMlaIncorrect = (mla: MLA) => {
-    return (
-      mla.is_incorrect ||
-      !mla.contact ||
-      mla.contact === 'Unknown' ||
-      !mla.email ||
-      mla.email === 'Unknown' ||
-      mla.name?.includes('TBD') ||
-      !mla.latitude ||
-      !mla.longitude ||
-      Math.abs(Number(mla.latitude)) < 0.1 ||
-      Math.abs(Number(mla.longitude)) < 0.1
-    );
-  };
-
   // Filter and sort incorrect MLAs
-  const incorrectMlas = useMemo(() => {
-    return mlas.filter(isMlaIncorrect);
-  }, [mlas]);
+  const incorrectMlas = useMemo(() => mlas.filter(m => m.is_incorrect === true), [mlas]);
 
+  // Apply location/scope filtering
   const filteredMlas = useMemo(() => {
     if (!isVolunteerPortal) return [];
     
@@ -423,7 +417,7 @@ function App() {
         homeCity: setupCity,
         homeConstituency: setupConstituency
       }, token);
-      const res = await api.getUserByClerkId(user.id);
+      const res = await api.getUserByClerkId(user.id, token);
       if (res && res.user) {
         setVolunteerProfile(res.user);
       }
@@ -439,7 +433,8 @@ function App() {
     setLoadingDelegates(true);
     setDelegationMla(activeMlaTask);
     try {
-      const list = await api.getVolunteersByConstituency(activeMlaTask.constituency);
+      const token = await getToken();
+      const list = await api.getVolunteersByConstituency(activeMlaTask.constituency, token);
       setDelegatedVolunteers(list);
     } catch (e) {
       console.warn('Failed to load local sentinels:', e);
@@ -528,13 +523,16 @@ function App() {
         
         {/* Absolute dark map background rendering target MLAs */}
         {!isMobile && (
-          <MapEngine 
-            issues={[]}
-            onMarkerTap={() => {}}
-            mlas={mlas}
-            onMlaMarkerTap={(mla) => setSelectedMlaId(mla.id)}
-            activeMlaId={selectedMlaId || activeMlaTask?.id || null}
-          />
+          <Suspense fallback={<MapPlaceholder />}>
+            <MapEngine
+              issues={[]}
+              onMarkerTap={() => {}}
+              mlas={mlas}
+              onMlaMarkerTap={(mla) => setSelectedMlaId(mla.id)}
+              activeMlaId={selectedMlaId || activeMlaTask?.id || null}
+              userLocation={userLocation}
+            />
+          </Suspense>
         )}
 
         {/* Portal Branding Badge */}
@@ -752,9 +750,28 @@ function App() {
                         <label className="text-[9px] uppercase font-black tracking-widest text-[#00D1FF] flex items-center gap-1">
                           <Sliders size={12} /> Scan Scope Radius
                         </label>
-                        <span className="text-[10px] text-white/40 font-bold uppercase tracking-wider">
-                          Tasks: {filteredMlas.length} Available
-                        </span>
+                        {!userLocation && (
+                          <button 
+                            onClick={() => {
+                              if ('geolocation' in navigator) {
+                                navigator.geolocation.getCurrentPosition(
+                                  (pos) => setUserLocation([pos.coords.latitude, pos.coords.longitude]),
+                                  () => alert('Location permission denied or unavailable.')
+                                );
+                              } else {
+                                alert('Geolocation not supported by your browser.');
+                              }
+                            }}
+                            className="text-[9px] uppercase font-black tracking-widest text-emerald-400 hover:underline flex items-center gap-1"
+                          >
+                            <MapPin size={10} /> Enable Radar
+                          </button>
+                        )}
+                        {userLocation && (
+                          <span className="text-[10px] text-white/40 font-bold uppercase tracking-wider">
+                            Tasks: {filteredMlas.length} Available
+                          </span>
+                        )}
                       </div>
                       <div className="grid grid-cols-4 bg-white/5 border border-white/10 p-1 rounded-xl text-center">
                         {(['local', 'nearby', 'state', 'nationwide'] as const).map(sc => (
@@ -1176,11 +1193,13 @@ function App() {
 
       {/* 3D Map Context / Mobile High-Performance List View fallback */}
       {(!isMobile || showMapOnMobile) ? (
-        <MapEngine 
-          issues={activeMapIssues} 
-          onMarkerTap={handleMarkerTap}
-          activeIssueId={activeIssue?.id || null}
-        />
+        <Suspense fallback={<MapPlaceholder />}>
+          <MapEngine
+            issues={activeMapIssues}
+            onMarkerTap={handleMarkerTap}
+            activeIssueId={activeIssue?.id || null}
+          />
+        </Suspense>
       ) : (
         <div className="absolute inset-0 w-full h-full bg-[#09090b] flex flex-col pt-24 pb-32 px-4 overflow-y-auto z-10 selection:bg-[var(--color-neon-amber)] selection:text-black">
           <div className="w-full max-w-xl mx-auto space-y-4">

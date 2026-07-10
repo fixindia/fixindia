@@ -171,7 +171,7 @@ export default function FullscreenLogin({ onClose, isVolunteer = true }: Fullscr
               aria-label="Sign In Form"
             >
               <SignIn 
-                routing="hash"
+                routing="virtual"
                 forceRedirectUrl={window.location.href}
                 fallbackRedirectUrl={window.location.href}
               />

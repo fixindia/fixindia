@@ -38,7 +38,7 @@ async function seed() {
         ${budgetValue}, ${w.city}, ${w.zone || null}, ${w.parliament || null}, ${w.mp_name || null},
         ${boundaryWkb ? sql`ST_GeomFromWKB(decode(${boundaryWkb}, 'hex'), 4326)` : null}
       )
-      ON CONFLICT (ward_number) DO UPDATE SET
+      ON CONFLICT (ward_number) WHERE ward_number IS NOT NULL DO UPDATE SET
         mla_name = EXCLUDED.mla_name,
         sanctioned_budget = EXCLUDED.sanctioned_budget,
         zone = EXCLUDED.zone,

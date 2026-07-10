@@ -32,15 +32,32 @@ CREATE TABLE IF NOT EXISTS wards (
   mla_name TEXT,
   mla_party TEXT,
   mla_contact TEXT,
+  constituency TEXT,
+  city TEXT,
   sanctioned_budget NUMERIC(12, 2),
   zone TEXT,
   parliamentary_constituency TEXT,
   mp_name TEXT,
-  boundaries GEOGRAPHY(MULTIPOLYGON, 4326) NOT NULL,
+  -- Nullable so scraped/seeded rows without geometry can still be inserted;
+  -- seed.ts passes NULL boundaries for wards lacking WKB data.
+  boundaries GEOGRAPHY(MULTIPOLYGON, 4326),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- seed.ts upserts with ON CONFLICT (ward_number); it needs a matching unique index.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_wards_ward_number
+  ON wards(ward_number)
+  WHERE ward_number IS NOT NULL;
+
 -- ─── Reports Table ─────────────────────────────
+-- NOTE on reports.creator_id (9.1): it is TEXT storing a Clerk ID ("user_...")
+-- and intentionally has NO hard foreign key to users(id). Clerk IDs may exist
+-- before a matching users row is created (a user can submit a report before
+-- their profile is synced via /api/users/sync), so a hard FK would reject
+-- valid inserts. Instead, the application keys updates on users.clerk_id
+-- (a soft FK), and idx_reports_creator_id (below) keeps those lookups fast.
+-- Do NOT add a hard FK here without first guaranteeing a users row exists for
+-- every report insert — that would break the report-then-sync flow.
 CREATE TABLE IF NOT EXISTS reports (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
@@ -160,6 +177,13 @@ CREATE INDEX IF NOT EXISTS idx_reports_ward_name ON reports(ward_name) WHERE war
 
 -- Composite index for common query pattern
 CREATE INDEX IF NOT EXISTS idx_reports_status_created ON reports(status, created_at DESC);
+
+-- Unique index on source_url so the project scraper can use
+-- INSERT ... ON CONFLICT (source_url) DO NOTHING (idempotent, race-safe).
+-- Partial: user-submitted reports have NULL source_url and are excluded.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_reports_source_url
+  ON reports(source_url)
+  WHERE source_url IS NOT NULL;
 
 -- ─── News Indexes ───────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_news_url ON local_news(url);

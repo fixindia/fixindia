@@ -32,18 +32,24 @@ export default function UserProfile({ isOpen, onClose, onReportClick, onMyIssues
   // Fetch backend profile data when panel opens
   useEffect(() => {
     if (isOpen && user) {
-      api.getUserByClerkId(user.id).then(data => {
-        if (data?.user) {
-          setJobTitle(data.user.job_title || '');
-          setSocials(data.user.socials || { facebook: '', instagram: '', linkedin: '' });
-          setBackendStats({
-            civicScore: data.user.civic_sense_score || 0,
-            reportsVerified: data.user.reports_verified || 0,
-          });
+      (async () => {
+        try {
+          const token = await getToken();
+          const data = await api.getUserByClerkId(user.id, token);
+          if (data?.user) {
+            setJobTitle(data.user.job_title || '');
+            setSocials(data.user.socials || { facebook: '', instagram: '', linkedin: '' });
+            setBackendStats({
+              civicScore: data.user.civic_sense_score || 0,
+              reportsVerified: data.user.reports_verified || 0,
+            });
+          }
+        } catch {
+          /* non-fatal: panel still renders with Clerk data */
         }
-      }).catch(() => {});
+      })();
     }
-  }, [isOpen, user]);
+  }, [isOpen, user, getToken]);
 
   const handleSave = async () => {
     if (!user) return;

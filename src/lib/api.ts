@@ -1,9 +1,28 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+// The backend listens on 6969 (see server/ecosystem.config.json). The old
+// localhost:4000 default silently broke local dev when VITE_API_URL was unset.
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:6969';
 
 function authHeaders(token: string | null): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   return headers;
+}
+
+// For mutating calls: a non-2xx response returns a JSON error body (e.g. 401
+// "Authentication required", 409 "Already upvoted", 500 "Submission failed").
+// res.json() resolves fine on those, so without this guard callers treat a
+// rejected write as success and silently drop the user's data. Throwing here
+// makes each caller's existing try/catch fire and surface the real failure.
+async function handleResponse(res: Response) {
+  if (!res.ok) {
+    let message = res.statusText || `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      if (body?.error) message = body.error;
+    } catch { /* non-JSON body; keep statusText */ }
+    throw new Error(message);
+  }
+  return res.json();
 }
 
 export const api = {
@@ -51,7 +70,7 @@ export const api = {
         headers: token ? { 'Authorization': `Bearer ${token}` } : {},
         body: formData,
       });
-      return res.json();
+      return handleResponse(res);
     }
 
     const res = await fetch(`${API_BASE}/api/reports`, {
@@ -59,7 +78,7 @@ export const api = {
       headers: authHeaders(token || null),
       body: JSON.stringify(report),
     });
-    return res.json();
+    return handleResponse(res);
   },
 
   async upvoteReport(reportId: string, userId: string, token?: string | null) {
@@ -68,7 +87,7 @@ export const api = {
       headers: authHeaders(token || null),
       body: JSON.stringify({ userId }),
     });
-    return res.json();
+    return handleResponse(res);
   },
 
   async verifyReport(reportId: string, userId: string, isValid: boolean, token?: string | null) {
@@ -77,7 +96,7 @@ export const api = {
       headers: authHeaders(token || null),
       body: JSON.stringify({ userId, isValid }),
     });
-    return res.json();
+    return handleResponse(res);
   },
 
   async getCitizenLeaderboard() {
@@ -110,11 +129,14 @@ export const api = {
       headers: authHeaders(token || null),
       body: JSON.stringify(profile),
     });
-    return res.json();
+    return handleResponse(res);
   },
 
-  async getUserByClerkId(clerkId: string) {
-    const res = await fetch(`${API_BASE}/api/users/clerk/${clerkId}`);
+  async getUserByClerkId(clerkId: string, token?: string | null) {
+    // This endpoint requires authentication server-side; always send the token.
+    const res = await fetch(`${API_BASE}/api/users/clerk/${encodeURIComponent(clerkId)}`, {
+      headers: authHeaders(token || null),
+    });
     return res.json();
   },
 
@@ -130,7 +152,7 @@ export const api = {
       headers: authHeaders(token || null),
       body: JSON.stringify(profile),
     });
-    return res.json();
+    return handleResponse(res);
   },
 
   async flagMLA(mlaId: number, token?: string | null) {
@@ -138,7 +160,7 @@ export const api = {
       method: 'POST',
       headers: authHeaders(token || null),
     });
-    return res.json();
+    return handleResponse(res);
   },
 
   async flagMLAByName(name: string, constituency?: string, token?: string | null) {
@@ -147,7 +169,7 @@ export const api = {
       headers: authHeaders(token || null),
       body: JSON.stringify({ name, constituency }),
     });
-    return res.json();
+    return handleResponse(res);
   },
 
   async getMLAs() {
@@ -156,8 +178,12 @@ export const api = {
     return data.mlas || [];
   },
 
-  async getVolunteersByConstituency(constituency: string) {
-    const res = await fetch(`${API_BASE}/api/users/volunteers/constituency/${constituency}`);
+  async getVolunteersByConstituency(constituency: string, token?: string | null) {
+    // Requires authentication server-side; always send the token.
+    const res = await fetch(
+      `${API_BASE}/api/users/volunteers/constituency/${encodeURIComponent(constituency)}`,
+      { headers: authHeaders(token || null) },
+    );
     const data = await res.json();
     return data.volunteers || [];
   },
@@ -168,26 +194,12 @@ export const api = {
       headers: authHeaders(token || null),
       body: JSON.stringify({ type, data, submittedBy, submitterEmail }),
     });
-    return res.json();
+    return handleResponse(res);
   },
 
-  async createUser(profile: { displayName?: string; jobTitle?: string; socials?: Record<string, string> }, token?: string | null) {
-    const res = await fetch(`${API_BASE}/api/users`, {
-      method: 'POST',
-      headers: authHeaders(token || null),
-      body: JSON.stringify(profile),
-    });
-    return res.json();
-  },
-
-  async updateUser(userId: string, profile: { displayName?: string; jobTitle?: string; socials?: Record<string, string>; avatarUrl?: string }, token?: string | null) {
-    const res = await fetch(`${API_BASE}/api/users/${userId}`, {
-      method: 'PUT',
-      headers: authHeaders(token || null),
-      body: JSON.stringify(profile),
-    });
-    return res.json();
-  },
+  // NOTE: The legacy UUID-based createUser/updateUser methods were removed along
+  // with their server routes (they allowed IDOR). Profile access now goes through
+  // syncClerkUser / getUserByClerkId / updateUserByClerkId.
 
   // ─── Volunteer System ────────────────────────
   async getVolunteerPending(token?: string | null) {
@@ -204,6 +216,6 @@ export const api = {
       headers: authHeaders(token || null),
       body: JSON.stringify({ verifierId, approved, notes }),
     });
-    return res.json();
+    return handleResponse(res);
   },
 };

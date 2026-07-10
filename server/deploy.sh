@@ -49,7 +49,9 @@ pm2 save
 # Health check
 echo "🏥 Running health check..."
 sleep 3
-if curl -f http://localhost:6969/health > /dev/null 2>&1 && curl -f http://localhost:6970/health > /dev/null 2>&1; then
+# Use the readiness probe (verifies the DB is actually reachable) rather than
+# the liveness-only /health endpoint, so a broken DB fails the deploy.
+if curl -f http://localhost:6969/health/ready > /dev/null 2>&1 && curl -f http://localhost:6970/health/ready > /dev/null 2>&1; then
   echo -e "${GREEN}✅ Deployment successful!${NC}"
   pm2 status
 else

@@ -4,7 +4,7 @@ import type { Issue } from '../types';
 import Leaderboard from './Leaderboard';
 import { MapPin, TrendingUp, ChevronUp, Newspaper, AlertTriangle } from 'lucide-react';
 import { api } from '../lib/api';
-import { useAuth } from '../lib/auth-provider';
+import { useAuth, useUser } from '../lib/auth-provider';
 
 const getVolunteerPortalUrl = (mlaName: string, constituency?: string) => {
   const params = new URLSearchParams({
@@ -34,7 +34,36 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
   const dragControls = useDragControls();
   const [flagging, setFlagging] = useState(false);
   const [flagged, setFlagged] = useState(false);
+  const [upvoting, setUpvoting] = useState(false);
+  const [upvoted, setUpvoted] = useState(false);
   const { getToken } = useAuth();
+  const { isSignedIn, user } = useUser();
+
+  const handleUpvote = async () => {
+    if (!activeIssue || upvoting || upvoted) return;
+    if (!isSignedIn) {
+      alert('Please sign in to upvote this issue.');
+      return;
+    }
+    setUpvoting(true);
+    try {
+      const token = await getToken();
+      // The server derives the voter from the verified token; the userId arg is
+      // vestigial (kept for the API signature). Throws on 401/409 (already voted).
+      await api.upvoteReport(activeIssue.id, user?.id || '', token);
+      setUpvoted(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '';
+      if (/already/i.test(msg)) {
+        setUpvoted(true); // idempotent from the user's perspective
+      } else {
+        console.error('Failed to upvote:', e);
+        alert('Failed to record your upvote. Please try again.');
+      }
+    } finally {
+      setUpvoting(false);
+    }
+  };
 
   const handleFlagMla = async () => {
     if (!activeIssue || !activeIssue.mla) return;
@@ -259,9 +288,13 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
                 )}
 
                 {activeIssue.status === 'open' && (
-                  <button className="w-full mt-2 bg-white/10 hover:bg-white/20 border border-white/10 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all">
+                  <button
+                    onClick={handleUpvote}
+                    disabled={upvoting || upvoted}
+                    className="w-full mt-2 bg-white/10 hover:bg-white/20 border border-white/10 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
                     <TrendingUp size={18} className="text-[#FFBF00]" />
-                    Still Broken (+1 Upvote)
+                    {upvoted ? 'Upvoted — thanks!' : upvoting ? 'Recording…' : 'Still Broken (+1 Upvote)'}
                   </button>
                 )}
 

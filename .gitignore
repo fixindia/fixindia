@@ -26,6 +26,16 @@ FIXES_APPLIED.md
 SCRAPING_COMPLETE.md
 SCRAPING_SYSTEM.md
 SECURITY_ENHANCEMENTS.md
+audit_report.md
+
+# QA screenshots / Playwright captures (not for production)
+*.playwright-mcp/
+admin_dashboard.png
+admin_test_error.png
+admin_test_success.png
+login_error.png
+mobile_screenshot.png
+test_success.png
 
 # Dependencies
 node_modules/

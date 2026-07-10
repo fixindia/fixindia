@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import Parser from 'rss-parser';
 import { queryLLM } from './llm';
 import sql from './db';
@@ -61,13 +61,15 @@ export async function runProjectScraper(): Promise<number> {
 
       for (const item of potentialInsights.slice(0, 8)) {
         if (!item.link) continue;
-        
-        // Deduplication
+
+        // Cost gate: skip the expensive LLM call for URLs already scraped.
+        // (Race-safety comes from ON CONFLICT on the INSERT below, not this
+        // check — see 9.2.)
         const existingByUrl = await sql`SELECT id FROM reports WHERE source_url = ${item.link} LIMIT 1`;
         if (existingByUrl.length > 0) continue;
 
         const textToAnalyze = `Title: ${item.title}\nDescription: ${item.contentSnippet || item.content || ''}`;
-        
+
         const llmResponse = await queryLLM(textToAnalyze, PROJECT_GEOCODE_SYSTEM_PROMPT);
         const jsonMatch = llmResponse.match(/\{[\s\S]*\}/);
         if (!jsonMatch) continue;
@@ -111,32 +113,40 @@ export async function runProjectScraper(): Promise<number> {
         if (lat < 11.5 || lat > 18.5) lat = 12.9716;
         if (lng < 74.0 || lng > 78.5) lng = 77.5946;
 
+        // INTEGRITY: This is an accountability platform. Engagement metrics
+        // (upvotes, verification_count) must reflect real citizen activity, not
+        // fabricated numbers. The previous Math.random() seeding manufactured
+        // fake civic engagement — start these at 0 and let real users drive them.
+        // Race-safe idempotent insert (9.2): uniq_reports_source_url makes
+        // ON CONFLICT (source_url) DO NOTHING prevent double-inserts under
+        // concurrent scraper runs.
         await sql`
           INSERT INTO reports (
-            title, category, location, status, severity, 
-            agency, ward_name, mla_name, sanctioned_budget, 
+            title, category, location, status, severity,
+            agency, ward_name, mla_name, sanctioned_budget,
             upvotes, verification_count, image_url, source_url, created_at
           )
           VALUES (
-            ${parsed.title.slice(0, 80)}, 
+            ${parsed.title.slice(0, 80)},
             ${category},
             ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography,
-            'open', 
-            ${severity}, 
-            ${parsed.agency || 'Government'}, 
-            ${parsed.ward || parsed.district || 'Karnataka State'}, 
-            ${parsed.mla || null}, 
+            'open',
+            ${severity},
+            ${parsed.agency || 'Government'},
+            ${parsed.ward || parsed.district || 'Karnataka State'},
+            ${parsed.mla || null},
             ${parsed.budget || 'Pending'},
-            ${Math.floor(Math.random() * 50) + 10}, 
-            ${Math.floor(Math.random() * 3) + 1}, 
+            0,
+            0,
             null,
             ${item.link},
             NOW()
           )
+          ON CONFLICT (source_url) WHERE source_url IS NOT NULL DO NOTHING
         `;
         inserted++;
         console.log(`[ProjectScraper] ✓ [${parsed.sentiment.toUpperCase()}] "${parsed.title}" | District: ${parsed.district}`);
-        
+
         await new Promise(r => setTimeout(r, 1000));
       }
     } catch (e) {
