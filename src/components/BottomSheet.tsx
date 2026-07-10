@@ -2,9 +2,10 @@ import { useState } from 'react';
 import { motion, useDragControls, type PanInfo } from 'framer-motion';
 import type { Issue } from '../types';
 import Leaderboard from './Leaderboard';
-import { MapPin, TrendingUp, ChevronUp, Newspaper, AlertTriangle } from 'lucide-react';
+import { MapPin, TrendingUp, ChevronUp, Newspaper, AlertTriangle, CheckCircle2, Wrench, Megaphone } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuth, useUser } from '../lib/auth-provider';
+import EscalateModal from './EscalateModal';
 
 const getVolunteerPortalUrl = (mlaName: string, constituency?: string) => {
   const params = new URLSearchParams({
@@ -62,6 +63,40 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
       }
     } finally {
       setUpvoting(false);
+    }
+  };
+
+  // Resolution lifecycle: local feedback mirrors the server consensus response.
+  const [resolveBusy, setResolveBusy] = useState<null | 'working' | 'fixed'>(null);
+  const [resolveMsg, setResolveMsg] = useState<string | null>(null);
+  const [localStatus, setLocalStatus] = useState<string | null>(null);
+  const [localFixed, setLocalFixed] = useState<number | null>(null);
+  const [escalateOpen, setEscalateOpen] = useState(false);
+
+  const handleResolve = async (vote: 'working' | 'fixed') => {
+    if (!activeIssue || resolveBusy) return;
+    if (!isSignedIn) {
+      alert('Please sign in to update this issue.');
+      return;
+    }
+    setResolveBusy(vote);
+    try {
+      const token = await getToken();
+      const res = await api.resolveReport(activeIssue.id, vote, token) as
+        { status?: string; fixedCount?: number; workingCount?: number };
+      if (res?.status) setLocalStatus(res.status);
+      if (typeof res?.fixedCount === 'number') setLocalFixed(res.fixedCount);
+      setResolveMsg(
+        res?.status === 'resolved' ? '✓ Marked resolved — thank you!'
+          : res?.status === 'in_progress' ? '🚧 Marked as work-in-progress'
+          : vote === 'fixed' ? `Recorded. ${res?.fixedCount || 0}/3 confirmations to resolve.`
+          : 'Recorded — thanks for the update.',
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '';
+      setResolveMsg(/already|no longer/i.test(msg) ? msg : 'Failed to record your update. Please try again.');
+    } finally {
+      setResolveBusy(null);
     }
   };
 
@@ -206,9 +241,20 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
                       <MapPin size={14} /> {activeIssue.ward}
                     </p>
                   </div>
-                  <div className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider shrink-0 ${activeIssue.status === 'open' ? 'bg-[#FFBF00]/20 text-[#FFBF00] border border-[#FFBF00]/30' : 'bg-[#00FF41]/20 text-[#00FF41] border border-[#00FF41]/30'}`}>
-                    {activeIssue.status}
-                  </div>
+                  {(() => {
+                    const s = localStatus || activeIssue.status;
+                    const style = s === 'open' ? 'bg-[#FFBF00]/20 text-[#FFBF00] border-[#FFBF00]/30'
+                      : s === 'in_progress' ? 'bg-[#00D1FF]/20 text-[#00D1FF] border-[#00D1FF]/30'
+                      : s === 'resolved' ? 'bg-[#00FF41]/20 text-[#00FF41] border-[#00FF41]/30'
+                      : s === 'rejected' ? 'bg-[var(--color-danger-red)]/20 text-[var(--color-danger-red)] border-[var(--color-danger-red)]/30'
+                      : 'bg-white/10 text-white/60 border-white/20';
+                    const label = s === 'in_progress' ? 'in progress' : s === 'pending_verification' ? 'pending' : s;
+                    return (
+                      <div className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider shrink-0 border ${style}`}>
+                        {label}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 mt-4">
@@ -287,16 +333,77 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
                   </div>
                 )}
 
-                {activeIssue.status === 'open' && (
-                  <button
-                    onClick={handleUpvote}
-                    disabled={upvoting || upvoted}
-                    className="w-full mt-2 bg-white/10 hover:bg-white/20 border border-white/10 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
-                  >
-                    <TrendingUp size={18} className="text-[#FFBF00]" />
-                    {upvoted ? 'Upvoted — thanks!' : upvoting ? 'Recording…' : 'Still Broken (+1 Upvote)'}
-                  </button>
-                )}
+                {(() => {
+                  // Live status reflects any resolution vote just cast this session.
+                  const status = localStatus || activeIssue.status;
+                  const fixedCount = localFixed ?? activeIssue.fixedCount ?? 0;
+                  const isLive = status === 'open' || status === 'in_progress';
+                  return (
+                    <>
+                      {isLive && (
+                        <button
+                          onClick={handleUpvote}
+                          disabled={upvoting || upvoted}
+                          className="w-full mt-2 bg-white/10 hover:bg-white/20 border border-white/10 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          <TrendingUp size={18} className="text-[#FFBF00]" />
+                          {upvoted ? 'Upvoted — thanks!' : upvoting ? 'Recording…' : 'Still Broken (+1 Upvote)'}
+                        </button>
+                      )}
+
+                      {/* Resolution lifecycle — close the accountability loop */}
+                      {isLive && (
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => handleResolve('working')}
+                            disabled={!!resolveBusy}
+                            className="bg-[#00D1FF]/10 hover:bg-[#00D1FF]/20 border border-[#00D1FF]/30 text-[#00D1FF] py-3.5 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                          >
+                            <Wrench size={16} />
+                            {resolveBusy === 'working' ? '…' : 'Work Started'}
+                          </button>
+                          <button
+                            onClick={() => handleResolve('fixed')}
+                            disabled={!!resolveBusy}
+                            className="bg-[#00FF41]/10 hover:bg-[#00FF41]/20 border border-[#00FF41]/30 text-[#00FF41] py-3.5 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                          >
+                            <CheckCircle2 size={16} />
+                            {resolveBusy === 'fixed' ? '…' : `Fixed ${fixedCount}/3`}
+                          </button>
+                        </div>
+                      )}
+
+                      {status === 'in_progress' && (
+                        <div className="mt-2 text-center text-[11px] font-bold uppercase tracking-widest text-[#00D1FF]/80">
+                          🚧 Work in progress
+                        </div>
+                      )}
+
+                      {status === 'resolved' && (
+                        <div className="mt-2 bg-gradient-to-br from-[#00FF41]/15 to-transparent border border-[#00FF41]/30 rounded-2xl p-5 flex flex-col items-center text-center gap-2">
+                          <CheckCircle2 size={32} className="text-[#00FF41]" />
+                          <span className="font-black text-[#00FF41]">Resolved by the community</span>
+                          <span className="text-xs text-white/50">Verified fixed by consensus. Accountability works.</span>
+                        </div>
+                      )}
+
+                      {/* Escalate — turn the wall of shame into action (Track 2) */}
+                      {isLive && (
+                        <button
+                          onClick={() => setEscalateOpen(true)}
+                          className="w-full mt-2 bg-gradient-to-r from-[#FFBF00]/15 to-[var(--color-danger-red)]/15 hover:from-[#FFBF00]/25 hover:to-[var(--color-danger-red)]/25 border border-[#FFBF00]/30 text-[#FFBF00] py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all"
+                        >
+                          <Megaphone size={18} />
+                          Escalate — File a Complaint
+                        </button>
+                      )}
+
+                      {resolveMsg && (
+                        <div className="mt-2 text-center text-xs text-white/70">{resolveMsg}</div>
+                      )}
+                    </>
+                  );
+                })()}
 
                 {activeIssue.sourceUrl && (
                   <a 
@@ -328,6 +435,8 @@ export default function BottomSheet({ sheetState, setSheetState, activeIssue, on
           </motion.div>
         )}
       </div>
+
+      <EscalateModal issue={activeIssue} isOpen={escalateOpen} onClose={() => setEscalateOpen(false)} />
     </motion.div>
   );
 }

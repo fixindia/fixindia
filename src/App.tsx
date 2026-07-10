@@ -14,7 +14,7 @@ function MapPlaceholder() {
 }
 import BottomSheet from './components/BottomSheet';
 import ReportModal from './components/ReportModal';
-import type { Issue, IssueCategory, VolunteerProfile, MLA } from './types';
+import type { Issue, IssueCategory, IssueSeverity, VolunteerProfile, MLA } from './types';
 import UserProfile from './components/UserProfile';
 import NavigationMenu, { type PageType } from './components/NavigationMenu';
 import ContentPages from './components/ContentPages';
@@ -24,12 +24,13 @@ import MyIssues from './components/MyIssues';
 import FullscreenLogin from './components/FullscreenLogin';
 import LiveabilityDashboard from './components/LiveabilityDashboard';
 import TrendingNews from './components/TrendingNews';
-import type { NewsArticle } from './types';
+import NotificationsPanel from './components/NotificationsPanel';
+import type { NewsArticle, AppNotification } from './types';
 import { api } from './lib/api';
-import { 
-  Newspaper, User, Menu, Shield, Sliders, Locate, LogOut, 
-  Compass, Users, Check, X, Loader2, AlertTriangle, 
-  CheckCircle, UserCheck, RefreshCw, MapPin
+import {
+  Newspaper, User, Menu, Shield, Sliders, Locate, LogOut,
+  Compass, Users, Check, X, Loader2, AlertTriangle,
+  CheckCircle, UserCheck, RefreshCw, MapPin, Bell
 } from 'lucide-react';
 import { getVolunteerLevel } from './lib/levels';
 
@@ -110,6 +111,9 @@ function App() {
   const [isMyIssuesOpen, setIsMyIssuesOpen] = useState(false);
   const [isLiveabilityOpen, setIsLiveabilityOpen] = useState(false);
   const [isTrendingOpen, setIsTrendingOpen] = useState(false);
+  const [isNotifOpen, setIsNotifOpen] = useState(false);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [notifUnread, setNotifUnread] = useState(0);
 
   // ─── Volunteer Portal Specific States ───
   const [mlas, setMlas] = useState<MLA[]>([]);
@@ -165,6 +169,33 @@ function App() {
     api.getReports().then(setIssues).catch(e => console.warn('API fetch failed, running offline:', e));
     api.getTrendingNews().then(setTrendingNews).catch(e => console.warn('News fetch failed:', e));
   }, []);
+
+  // Notifications: fetch on sign-in and poll periodically (Track 4).
+  useEffect(() => {
+    if (!isSignedIn) { setNotifications([]); setNotifUnread(0); return; }
+    let active = true;
+    const load = async () => {
+      try {
+        const token = await getToken();
+        const data = await api.getNotifications(token) as { unread: number; notifications: AppNotification[] };
+        if (!active) return;
+        setNotifications(data.notifications || []);
+        setNotifUnread(data.unread || 0);
+      } catch { /* best-effort */ }
+    };
+    load();
+    const iv = setInterval(load, 60000);
+    return () => { active = false; clearInterval(iv); };
+  }, [isSignedIn, getToken]);
+
+  const handleMarkAllNotifsRead = async () => {
+    try {
+      const token = await getToken();
+      await api.markNotificationsRead(undefined, token);
+      setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+      setNotifUnread(0);
+    } catch { /* ignore */ }
+  };
 
   // Fetch MLAs & User Geolocation if on Volunteer Portal
   useEffect(() => {
@@ -285,7 +316,7 @@ function App() {
     setSheetState('half');
   };
 
-  const handleReportSubmit = async (category: IssueCategory, customCategory: string | undefined, imageFile: File | null) => {
+  const handleReportSubmit = async (category: IssueCategory, customCategory: string | undefined, imageFile: File | null, severity: IssueSeverity = 'medium') => {
     // Get real user location
     if (!navigator.geolocation) {
       alert('Geolocation is not supported by your browser. Please enable location services.');
@@ -298,6 +329,27 @@ function App() {
         const lng = position.coords.longitude;
 
         try {
+          // Duplicate detection (Track 3): warn if a very similar report already
+          // exists nearby, and let the citizen add their voice instead of
+          // fragmenting the pressure with a duplicate.
+          try {
+            const nearby = await api.getNearbyReports(lat, lng, category, 75) as
+              Array<{ id: string; title: string; distanceM: number }>;
+            if (nearby.length > 0) {
+              const n = nearby[0];
+              const upvoteInstead = window.confirm(
+                `A similar report already exists ${Math.round(n.distanceM)}m away:\n\n"${n.title}"\n\nAdd your voice by upvoting it instead of creating a duplicate?\n\nOK = Upvote existing • Cancel = Post my own`,
+              );
+              if (upvoteInstead) {
+                const token = isSignedIn ? await getToken() : null;
+                try { await api.upvoteReport(n.id, user?.id || '', token); } catch { /* already upvoted */ }
+                const fresh = await api.getReports();
+                setIssues(fresh);
+                return;
+              }
+            }
+          } catch { /* nearby check is best-effort */ }
+
           const token = isSignedIn ? await getToken() : null;
           await api.submitReport({
             title: customCategory || category,
@@ -305,7 +357,7 @@ function App() {
             customCategory,
             latitude: lat,
             longitude: lng,
-            severity: 'medium',
+            severity,
             creatorId: user?.id,
             image: imageFile || undefined
           }, token);
@@ -1090,7 +1142,21 @@ function App() {
             <Newspaper size={18} className="text-[#FF9933]" />
             <span className="text-xs font-bold uppercase tracking-widest hidden md:block text-[#FF9933]">News</span>
           </button>
-          <button 
+          {isSignedIn && (
+            <button
+              onClick={() => setIsNotifOpen(true)}
+              className="relative w-12 h-12 bg-black/60 backdrop-blur-xl border border-white/10 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors shadow-lg"
+              title="Notifications"
+            >
+              <Bell size={18} className="text-[#00D1FF]" />
+              {notifUnread > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 bg-[var(--color-danger-red)] rounded-full text-[10px] font-black flex items-center justify-center border-2 border-[var(--color-brand-bg)]">
+                  {notifUnread > 9 ? '9+' : notifUnread}
+                </span>
+              )}
+            </button>
+          )}
+          <button
             onClick={() => {
               if (!isSignedIn) setShowSignIn(true);
               else setIsProfileOpen(true);
@@ -1170,10 +1236,22 @@ function App() {
         )}
       </AnimatePresence>
 
-      <TrendingNews 
+      <TrendingNews
         isOpen={isTrendingOpen}
         onClose={() => setIsTrendingOpen(false)}
         news={trendingNews}
+      />
+
+      <NotificationsPanel
+        isOpen={isNotifOpen}
+        onClose={() => setIsNotifOpen(false)}
+        notifications={notifications}
+        onMarkAllRead={handleMarkAllNotifsRead}
+        onOpenReport={(reportId) => {
+          const found = issues.find(i => i.id === reportId);
+          if (found) { setActiveIssue(found); setSheetState('half'); }
+          setIsNotifOpen(false);
+        }}
       />
 
       {/* Global Swipe Right Zone for Trending News (Mobile) */}

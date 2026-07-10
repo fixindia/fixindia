@@ -228,3 +228,61 @@ CREATE TABLE IF NOT EXISTS ai_models (
 
 CREATE INDEX IF NOT EXISTS idx_ai_models_priority ON ai_models(priority) WHERE is_enabled = TRUE;
 
+-- Vision capability flag (Track 3 — AI photo analysis). migrate.ts also adds
+-- this idempotently for already-provisioned DBs and seeds a Groq vision model.
+ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS is_vision BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ═══════════════════════════════════════════════
+-- ACCOUNTABILITY LOOP + ENGAGEMENT TABLES
+-- ═══════════════════════════════════════════════
+
+-- ─── Resolutions (consensus "is it fixed?" votes) ──
+-- Mirrors `verifications`: one upsertable vote per (report, user). 'working'
+-- votes move open→in_progress (quorum 2); 'fixed' votes move
+-- open/in_progress→resolved (consensus 3). See POST /api/reports/:id/resolve.
+CREATE TABLE IF NOT EXISTS resolutions (
+  id SERIAL PRIMARY KEY,
+  report_id UUID NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  vote TEXT NOT NULL CHECK (vote IN ('working', 'fixed')),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(report_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_resolutions_report_id ON resolutions(report_id);
+
+-- ─── Report status-transition log (timeline + notification source) ──
+CREATE TABLE IF NOT EXISTS report_status_events (
+  id SERIAL PRIMARY KEY,
+  report_id UUID NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+  actor_id TEXT,
+  from_status TEXT,
+  to_status TEXT NOT NULL,
+  note TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_status_events_report ON report_status_events(report_id, created_at DESC);
+
+-- ─── In-app notifications (Track 4) ──
+CREATE TABLE IF NOT EXISTS notifications (
+  id SERIAL PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT,
+  report_id UUID REFERENCES reports(id) ON DELETE CASCADE,
+  is_read BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at DESC);
+
+-- ─── Escalation log (Track 2 — complaint filed against a report) ──
+CREATE TABLE IF NOT EXISTS escalations (
+  id SERIAL PRIMARY KEY,
+  report_id UUID NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  channel TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_escalations_report ON escalations(report_id);
+

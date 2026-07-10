@@ -1,4 +1,4 @@
-export type IssueStatus = 'open' | 'resolved' | 'pending_verification';
+export type IssueStatus = 'pending_verification' | 'open' | 'in_progress' | 'resolved' | 'rejected';
 export type IssueCategory = 'Pothole' | 'Broken Footpath' | 'Drainage' | 'Streetlight' | 'Other' | string;
 export type IssueSeverity = 'low' | 'medium' | 'high' | 'critical';
 
@@ -26,6 +26,8 @@ export interface Issue {
   sanctionedBudget: string;
   upvotes: number;
   verificationCount?: number;
+  fixedCount?: number;
+  workingCount?: number;
   customCategory?: string;
   isMine?: boolean;
   timestamp: string;
@@ -35,6 +37,23 @@ export interface Issue {
   mp?: string;
   imageUrl?: string;
   sourceUrl?: string;
+}
+
+export interface StatusEvent {
+  fromStatus?: string;
+  toStatus: string;
+  note?: string;
+  createdAt: string;
+}
+
+export interface AppNotification {
+  id: number;
+  type: string;
+  title: string;
+  body?: string;
+  reportId?: string;
+  isRead: boolean;
+  createdAt: string;
 }
 
 export interface UserStats {

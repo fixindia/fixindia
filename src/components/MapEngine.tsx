@@ -214,23 +214,30 @@ const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId, 
 
         {issues.map((issue) => {
           let coreColor = 'bg-white';
-          
+
           switch(issue.severity) {
-            case 'critical': 
-              coreColor = 'bg-[var(--color-danger-red)]'; 
+            case 'critical':
+              coreColor = 'bg-[var(--color-danger-red)]';
               break;
-            case 'high': 
-              coreColor = 'bg-[#FF8C00]'; 
+            case 'high':
+              coreColor = 'bg-[#FF8C00]';
               break;
-            case 'medium': 
-              coreColor = 'bg-[var(--color-neon-amber)]'; 
+            case 'medium':
+              coreColor = 'bg-[var(--color-neon-amber)]';
               break;
-            case 'low': 
-              coreColor = 'bg-[#00FF41]'; 
+            case 'low':
+              coreColor = 'bg-[#00FF41]';
               break;
             default:
               coreColor = 'bg-white';
           }
+
+          // Status overrides severity color so the map shows the accountability
+          // loop at a glance: resolved = solid green (dimmed), in_progress = cyan.
+          const isResolved = issue.status === 'resolved';
+          const isInProgress = issue.status === 'in_progress';
+          if (isResolved) coreColor = 'bg-[#00FF41]';
+          else if (isInProgress) coreColor = 'bg-[#00D1FF]';
 
           const isActive = activeIssueId === issue.id;
 
@@ -243,16 +250,21 @@ const MapEngine = memo(function MapEngine({ issues, onMarkerTap, activeIssueId, 
               onClick={(e) => handleMarkerClick(e, issue)}
             >
               <div className="relative flex items-center justify-center p-3 cursor-pointer group">
-                <div 
+                <div
                   className={`
-                    w-4 h-4 rounded-full border-2 border-[var(--color-brand-bg)] 
+                    w-4 h-4 rounded-full border-2 border-[var(--color-brand-bg)]
                     ${coreColor}
                     transition-transform duration-300
-                    ${issue.severity === 'critical' ? 'critical-pulse' : ''}
-                    ${issue.severity === 'high' ? 'high-pulse' : ''}
+                    ${isResolved ? 'opacity-50' : ''}
+                    ${!isResolved && issue.severity === 'critical' ? 'critical-pulse' : ''}
+                    ${!isResolved && issue.severity === 'high' ? 'high-pulse' : ''}
                     ${isActive ? 'scale-[2.5] z-50' : 'scale-100 group-hover:scale-[1.5]'}
-                  `} 
-                />
+                  `}
+                >
+                  {isResolved && (
+                    <span className="absolute inset-0 flex items-center justify-center text-[8px] font-black text-[var(--color-brand-bg)] leading-none">✓</span>
+                  )}
+                </div>
               </div>
             </Marker>
           );

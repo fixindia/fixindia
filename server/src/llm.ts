@@ -12,6 +12,7 @@ interface AIModel {
   priority: number;
   is_enabled: boolean;
   is_free: boolean;
+  is_vision?: boolean;
 }
 
 let cachedModels: AIModel[] = [];
@@ -29,7 +30,8 @@ async function getActiveModels(): Promise<AIModel[]> {
 
   try {
     const models = await sql`
-      SELECT id, name, provider, model_string, api_key, api_key_env_var, api_endpoint, priority, is_enabled, is_free
+      SELECT id, name, provider, model_string, api_key, api_key_env_var, api_endpoint, priority, is_enabled, is_free,
+             COALESCE(is_vision, FALSE) AS is_vision
       FROM ai_models
       WHERE is_enabled = TRUE
       ORDER BY priority ASC
@@ -144,4 +146,66 @@ export async function queryLLM(prompt: string, systemPrompt?: string): Promise<s
   }
 
   throw new Error('All configured LLM providers failed or returned errors');
+}
+
+/**
+ * Multimodal (vision) completion. Sends an image + prompt to a vision-capable
+ * model (ai_models.is_vision = TRUE), in priority order with failover, using the
+ * OpenAI-compatible content-array message form. Returns the raw string reply
+ * (callers JSON-extract as usual). Throws if no vision model is configured or
+ * all fail — the caller is expected to fall back to manual entry.
+ */
+export async function queryVision(imageDataUrl: string, prompt: string, systemPrompt?: string): Promise<string> {
+  const models = (await getActiveModels()).filter((m) => m.is_vision);
+
+  if (models.length === 0) {
+    throw new Error('No vision-capable AI models configured');
+  }
+
+  for (const model of models) {
+    try {
+      console.log(`[LLM] Vision query: ${model.name} (${model.model_string}) via ${model.provider}...`);
+      const apiKey = getAPIKey(model);
+      const endpoint = model.api_endpoint || 'https://api.groq.com/openai/v1/chat/completions';
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      };
+      if (model.provider === 'OpenRouter') {
+        headers['HTTP-Referer'] = 'https://civicmap.in';
+      }
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(20000),
+        body: JSON.stringify({
+          model: model.model_string,
+          messages: [
+            ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: imageDataUrl } },
+              ],
+            },
+          ],
+          temperature: 0.1,
+          max_tokens: 500,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json() as any;
+        return data.choices[0].message.content;
+      }
+      console.warn(`[LLM] Vision model ${model.name} failed with status ${res.status}. Trying fallback...`);
+    } catch (err) {
+      console.warn(`[LLM] Vision model ${model.name} query failed:`, err);
+    }
+  }
+
+  throw new Error('All configured vision providers failed or returned errors');
 }

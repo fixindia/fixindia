@@ -124,5 +124,81 @@ export async function runMigrations(): Promise<void> {
     await tx`
       CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_log(created_at DESC)
     `;
+
+    // ── Resolution lifecycle (closes the accountability loop) ──
+    // Consensus "is it fixed?" votes, mirroring the `verifications` table.
+    // One row per (report, user), upserted: a user's latest assessment wins.
+    // 'working' votes drive open→in_progress (quorum 2); 'fixed' votes drive
+    // open/in_progress→resolved (consensus 3). See POST /api/reports/:id/resolve.
+    await tx`
+      CREATE TABLE IF NOT EXISTS resolutions (
+        id SERIAL PRIMARY KEY,
+        report_id UUID NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        vote TEXT NOT NULL CHECK (vote IN ('working', 'fixed')),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(report_id, user_id)
+      )
+    `;
+    await tx`CREATE INDEX IF NOT EXISTS idx_resolutions_report_id ON resolutions(report_id)`;
+
+    // Append-only status-transition log → powers the My-Issues timeline and
+    // is the source that notifications are generated from.
+    await tx`
+      CREATE TABLE IF NOT EXISTS report_status_events (
+        id SERIAL PRIMARY KEY,
+        report_id UUID NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+        actor_id TEXT,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        note TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await tx`CREATE INDEX IF NOT EXISTS idx_status_events_report ON report_status_events(report_id, created_at DESC)`;
+
+    // In-app notifications (Track 4). user_id is a Clerk ID.
+    await tx`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT,
+        report_id UUID REFERENCES reports(id) ON DELETE CASCADE,
+        is_read BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await tx`CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at DESC)`;
+
+    // Escalation log (Track 2) — counts citizens who filed a complaint on a
+    // report, feeding "pressure" metrics. No PII beyond the actor's Clerk ID.
+    await tx`
+      CREATE TABLE IF NOT EXISTS escalations (
+        id SERIAL PRIMARY KEY,
+        report_id UUID NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        channel TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `;
+    await tx`CREATE INDEX IF NOT EXISTS idx_escalations_report ON escalations(report_id)`;
+
+    // ── AI vision support (Track 3) ──
+    // Flag models that can accept images (multimodal). queryVision() selects
+    // is_vision = TRUE rows. Idempotent column add + seed one Groq vision model.
+    await tx`ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS is_vision BOOLEAN NOT NULL DEFAULT FALSE`;
+    const visionCount = await tx`SELECT COUNT(*)::integer AS count FROM ai_models WHERE is_vision = TRUE`;
+    if (visionCount[0] && visionCount[0].count === 0) {
+      await tx`
+        INSERT INTO ai_models (name, provider, model_string, api_key_env_var, api_endpoint, priority, is_enabled, is_free, is_vision)
+        VALUES
+          ('Groq Llama 4 Scout (vision)', 'Groq', 'meta-llama/llama-4-scout-17b-16e-instruct', 'GROQ_API_KEYS', 'https://api.groq.com/openai/v1/chat/completions', 1, TRUE, TRUE, TRUE)
+        ON CONFLICT (name) DO NOTHING
+      `;
+      console.log('✓ Seeded default vision model.');
+    }
   });
 }

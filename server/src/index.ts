@@ -16,6 +16,9 @@ import cron from 'node-cron';
 import { validateEnv, env } from './config';
 import { runMigrations } from './migrate';
 import { SCRAPING_SCHEDULE } from './config/cities';
+import { nextResolutionStatus } from './lib/resolution';
+import { resolveAgency, draftComplaint } from './lib/escalation';
+import { analyzeCivicImage } from './lib/vision';
 
 // Validate environment variables on startup
 validateEnv();
@@ -206,6 +209,8 @@ const app = new Elysia({
           r.id, r.title, r.category, r.custom_category, r.status, r.severity,
           r.agency, r.ward_name, r.mla_name, r.sanctioned_budget,
           r.upvotes, r.verification_count,
+          (SELECT COUNT(*) FROM resolutions rz WHERE rz.report_id = r.id AND rz.vote = 'fixed')::int AS fixed_count,
+          (SELECT COUNT(*) FROM resolutions rz WHERE rz.report_id = r.id AND rz.vote = 'working')::int AS working_count,
           ST_Y(r.location::geometry) AS latitude,
           ST_X(r.location::geometry) AS longitude,
           r.created_at, r.creator_id,
@@ -265,6 +270,8 @@ const app = new Elysia({
           sanctionedBudget: r.sanctioned_budget,
           upvotes: r.upvotes,
           verificationCount: r.verification_count,
+          fixedCount: r.fixed_count,
+          workingCount: r.working_count,
           timestamp: formatRelativeTime(r.created_at),
           newsContext,
           zone: r.zone,
@@ -292,6 +299,8 @@ const app = new Elysia({
           id, title, category, custom_category, status, severity,
           agency, ward_name, mla_name, sanctioned_budget,
           upvotes, verification_count,
+          (SELECT COUNT(*) FROM resolutions rz WHERE rz.report_id = reports.id AND rz.vote = 'fixed')::int AS fixed_count,
+          (SELECT COUNT(*) FROM resolutions rz WHERE rz.report_id = reports.id AND rz.vote = 'working')::int AS working_count,
           ST_Y(location::geometry) as latitude,
           ST_X(location::geometry) as longitude,
           created_at, creator_id,
@@ -322,6 +331,8 @@ const app = new Elysia({
           sanctionedBudget: r.sanctioned_budget,
           upvotes: r.upvotes,
           verificationCount: r.verification_count,
+          fixedCount: r.fixed_count,
+          workingCount: r.working_count,
           timestamp: formatRelativeTime(r.created_at),
           zone: r.zone,
           parliament: r.parliamentary_constituency,
@@ -432,16 +443,13 @@ const app = new Elysia({
 
     const ward = wardMatch[0] || { ward_name: 'Unknown Ward', mla_name: 'TBD', sanctioned_budget: 'Pending', zone: null, parliamentary_constituency: null, mp_name: null };
 
-    const agencyMap: Record<string, string> = {
-      'Pothole': 'BBMP Major Roads',
-      'Broken Footpath': 'BBMP Ward Level',
-      'Drainage': 'BWSSB',
-      'Streetlight': 'BESCOM',
-    };
+    // Smart agency routing: keyword-based, covers standard categories AND free-text
+    // "Other" descriptions, with a safe 'Municipal Corporation' default. See lib/escalation.ts.
+    const agency = resolveAgency(category, customCategory);
 
     const [report] = await sql`
       INSERT INTO reports (
-        title, category, custom_category, location, severity, agency, 
+        title, category, custom_category, location, severity, agency,
         ward_name, mla_name, sanctioned_budget, creator_id,
         zone, parliamentary_constituency, mp_name, image_url
       )
@@ -451,7 +459,7 @@ const app = new Elysia({
         ${customCategory ? customCategory.slice(0, 100) : null},
         ST_SetSRID(ST_MakePoint(${longitude}, ${latitude}), 4326)::geography,
         ${safeSeverity},
-        ${agencyMap[category] || 'Municipal Corporation'},
+        ${agency},
         ${ward.ward_name},
         ${ward.mla_name},
         ${'₹' + (ward.sanctioned_budget || '0') + ' Crores'},
@@ -601,10 +609,25 @@ const app = new Elysia({
         // Consensus thresholds (require 3 concurring votes either way).
         const CONSENSUS = 3;
         if (validCount >= CONSENSUS) {
-          await tx`
+          const [opened] = await tx`
             UPDATE reports SET status = 'open'
             WHERE id = ${params.id} AND status = 'pending_verification'
+            RETURNING creator_id
           `;
+          // Notify the reporter that their report cleared verification (Track 4).
+          if (opened?.creator_id) {
+            await tx`
+              INSERT INTO report_status_events (report_id, actor_id, from_status, to_status, note)
+              VALUES (${params.id}, ${userId}, 'pending_verification', 'open', 'community verified')
+            `;
+            if (opened.creator_id !== userId) {
+              await tx`
+                INSERT INTO notifications (user_id, type, title, body, report_id)
+                VALUES (${opened.creator_id}, 'verified', 'Your report is now live! 📍',
+                  'The community verified your report — it is now visible on the map.', ${params.id})
+              `;
+            }
+          }
         } else if (invalidCount >= CONSENSUS) {
           // Community judged the report invalid → reject (not "resolved").
           // Capture the image_url before the status flip so we can clean up
@@ -664,6 +687,439 @@ const app = new Elysia({
     })
   })
 
+  // ─── Resolve / Progress (closes the accountability loop) ──────
+  // Consensus "is it fixed?" voting, mirroring /verify. A user upserts a single
+  // vote: 'working' (I saw work happening) or 'fixed' (this is resolved).
+  //   • distinct 'working' >= 2  AND status = 'open'                 → 'in_progress'
+  //   • distinct 'fixed'   >= 3  AND status IN ('open','in_progress') → 'resolved'
+  // One actor can never resolve alone (needs 3 concurring 'fixed'). Every
+  // transition is logged to report_status_events and notifies the reporter.
+  .post('/api/reports/:id/resolve', async ({ params, body, set, request }) => {
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to update an issue' };
+    }
+    const userId = auth.userId!;
+
+    const userLimit = checkUserRateLimit(userId, 'resolve_report', 30, 10 * 60 * 1000);
+    if (!userLimit.allowed) {
+      set.status = 429;
+      return { error: 'Too many updates. Slow down.', retryAfter: userLimit.retryAfter };
+    }
+
+    if (!UUID_RE.test(params.id)) {
+      set.status = 400;
+      return { success: false, error: 'Invalid report ID.' };
+    }
+
+    const vote = body.vote;
+
+    try {
+      const outcome = await sql.begin(async (tx: any) => {
+        const [rpt] = await tx`SELECT creator_id, status FROM reports WHERE id = ${params.id}`;
+        if (!rpt) return { notFound: true };
+        // Only actionable while the issue is live. pending/rejected/resolved are terminal here.
+        if (!['open', 'in_progress'].includes(rpt.status)) {
+          return { badState: true, status: rpt.status };
+        }
+
+        // Upsert the user's latest assessment (they may go working → fixed later).
+        await tx`
+          INSERT INTO resolutions (report_id, user_id, vote)
+          VALUES (${params.id}, ${userId}, ${vote})
+          ON CONFLICT (report_id, user_id)
+          DO UPDATE SET vote = EXCLUDED.vote, updated_at = NOW()
+        `;
+
+        const [counts] = await tx`
+          SELECT
+            COUNT(*) FILTER (WHERE vote = 'working') AS working,
+            COUNT(*) FILTER (WHERE vote = 'fixed')   AS fixed
+          FROM resolutions
+          WHERE report_id = ${params.id}
+        `;
+        const workingCount = Number(counts.working);
+        const fixedCount = Number(counts.fixed);
+
+        // Pure, unit-tested transition decision (see lib/resolution.ts).
+        const decided = nextResolutionStatus(rpt.status, workingCount, fixedCount);
+        let newStatus: string | null = null;
+        if (decided === 'resolved') {
+          const [row] = await tx`
+            UPDATE reports SET status = 'resolved', updated_at = NOW()
+            WHERE id = ${params.id} AND status IN ('open', 'in_progress')
+            RETURNING status
+          `;
+          if (row) newStatus = 'resolved';
+        } else if (decided === 'in_progress') {
+          const [row] = await tx`
+            UPDATE reports SET status = 'in_progress', updated_at = NOW()
+            WHERE id = ${params.id} AND status = 'open'
+            RETURNING status
+          `;
+          if (row) newStatus = 'in_progress';
+        }
+
+        // Credit the voter's civic contribution (like /verify credits verifiers).
+        await tx`
+          UPDATE users
+          SET integrations_helped = integrations_helped + 1, trust_score = trust_score + 5
+          WHERE clerk_id = ${userId}
+        `;
+
+        if (newStatus) {
+          await tx`
+            INSERT INTO report_status_events (report_id, actor_id, from_status, to_status, note)
+            VALUES (${params.id}, ${userId}, ${rpt.status}, ${newStatus}, ${'community consensus'})
+          `;
+          if (newStatus === 'resolved' && rpt.creator_id) {
+            // Reward the reporter for getting their issue fixed, and notify them.
+            await tx`
+              UPDATE users SET trust_score = trust_score + 25 WHERE clerk_id = ${rpt.creator_id}
+            `;
+            if (rpt.creator_id !== userId) {
+              await tx`
+                INSERT INTO notifications (user_id, type, title, body, report_id)
+                VALUES (${rpt.creator_id}, 'resolved', 'Your report was resolved! ✓',
+                  'The community confirmed your reported issue has been fixed.', ${params.id})
+              `;
+            }
+          } else if (newStatus === 'in_progress' && rpt.creator_id && rpt.creator_id !== userId) {
+            await tx`
+              INSERT INTO notifications (user_id, type, title, body, report_id)
+              VALUES (${rpt.creator_id}, 'in_progress', 'Work has started on your report 🚧',
+                'A citizen reported that work is underway on your issue.', ${params.id})
+            `;
+          }
+        }
+
+        return { status: newStatus || rpt.status, workingCount, fixedCount };
+      });
+
+      if ((outcome as any).notFound) {
+        set.status = 404;
+        return { success: false, error: 'Report not found' };
+      }
+      if ((outcome as any).badState) {
+        set.status = 409;
+        return { success: false, error: `Issue is ${(outcome as any).status} and can no longer be updated.` };
+      }
+
+      return { success: true, ...(outcome as any) };
+    } catch {
+      set.status = 500;
+      return { success: false, error: 'Failed to record your update.' };
+    }
+  }, {
+    params: t.Object({ id: t.String() }),
+    body: t.Object({ vote: t.Union([t.Literal('working'), t.Literal('fixed')]) })
+  })
+
+  // ─── Draft a complaint / escalation for a report (Track 2) ────
+  // Turns passive "wall of shame" into action: produces a formal complaint the
+  // citizen can email their MLA or share. AI-drafted when a key is set, else a
+  // strong deterministic template. Also returns the MLA's contact so the client
+  // can build a mailto:. Records the escalation for pressure metrics.
+  .post('/api/reports/:id/complaint', async ({ params, set, request }) => {
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required to file a complaint' };
+    }
+    const userId = auth.userId!;
+
+    const limit = checkUserRateLimit(userId, 'complaint', 15, 10 * 60 * 1000);
+    if (!limit.allowed) {
+      set.status = 429;
+      return { error: 'Too many complaints drafted. Slow down.', retryAfter: limit.retryAfter };
+    }
+
+    if (!UUID_RE.test(params.id)) {
+      set.status = 400;
+      return { error: 'Invalid report ID.' };
+    }
+
+    try {
+      const [r] = await sql`
+        SELECT title, category, custom_category, agency, ward_name, mla_name, mp_name,
+               sanctioned_budget, upvotes,
+               ST_Y(location::geometry) AS latitude, ST_X(location::geometry) AS longitude,
+               EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400 AS days_open
+        FROM reports WHERE id = ${params.id}
+      `;
+      if (!r) {
+        set.status = 404;
+        return { error: 'Report not found' };
+      }
+
+      // Best-effort contact lookup: the report denormalizes mla_name; join mlas
+      // for a real phone/email where available.
+      let mlaEmail: string | null = null;
+      let mlaPhone: string | null = null;
+      if (r.mla_name) {
+        const [m] = await sql`SELECT email, contact FROM mlas WHERE name = ${r.mla_name} LIMIT 1`;
+        if (m) { mlaEmail = m.email || null; mlaPhone = m.contact || null; }
+      }
+
+      const complaint = await draftComplaint({
+        title: r.title,
+        category: r.category,
+        customCategory: r.custom_category,
+        ward: r.ward_name,
+        mla: r.mla_name,
+        mp: r.mp_name,
+        agency: r.agency,
+        sanctionedBudget: r.sanctioned_budget,
+        latitude: r.latitude,
+        longitude: r.longitude,
+        daysOpen: r.days_open != null ? Math.floor(Number(r.days_open)) : null,
+        upvotes: r.upvotes,
+      });
+
+      // Log the escalation (fire-and-forget semantics; failure must not block the draft).
+      try {
+        await sql`INSERT INTO escalations (report_id, user_id, channel) VALUES (${params.id}, ${userId}, 'draft')`;
+      } catch (e) {
+        logger.warn('Failed to log escalation', { error: String(e) });
+      }
+
+      return {
+        subject: complaint.subject,
+        body: complaint.body,
+        source: complaint.source,
+        recipient: {
+          mlaName: r.mla_name || null,
+          mlaEmail,
+          mlaPhone,
+          agency: r.agency || null,
+        },
+      };
+    } catch (err) {
+      logger.error('Failed to draft complaint', { error: String(err) });
+      set.status = 500;
+      return { error: 'Failed to draft complaint' };
+    }
+  }, {
+    params: t.Object({ id: t.String() })
+  })
+
+  // ─── AI photo analysis (Track 3) ─────────────
+  // Suggests category + severity from an uploaded photo so reporting is faster.
+  // Analysis only — does NOT store the image (the report-submit path does that).
+  // Returns { suggestion: null } when no vision model/key is available so the
+  // client falls back to manual selection.
+  .post('/api/reports/analyze-image', async ({ body, set, request }) => {
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required' };
+    }
+    const userId = auth.userId!;
+    const limit = checkUserRateLimit(userId, 'analyze_image', 20, 10 * 60 * 1000);
+    if (!limit.allowed) {
+      set.status = 429;
+      return { error: 'Too many analyses. Slow down.', retryAfter: limit.retryAfter };
+    }
+
+    const image = (body as any)?.image;
+    if (!(image instanceof File)) {
+      set.status = 400;
+      return { error: 'An image file is required.' };
+    }
+    const MAX_SIZE = 10 * 1024 * 1024;
+    if (image.size > MAX_SIZE) {
+      set.status = 400;
+      return { error: 'Image too large. Maximum 10MB allowed.' };
+    }
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    if (!allowedTypes.includes(image.type)) {
+      set.status = 400;
+      return { error: 'Invalid image type. Only JPEG, PNG, and WebP allowed.' };
+    }
+    const buf = Buffer.from(await image.arrayBuffer());
+    if (!validateImageMagicBytes(buf, image.type)) {
+      set.status = 400;
+      return { error: 'Image content does not match declared type.' };
+    }
+
+    try {
+      const dataUrl = `data:${image.type};base64,${buf.toString('base64')}`;
+      const suggestion = await analyzeCivicImage(dataUrl);
+      return { suggestion }; // null when no vision model configured → client stays manual
+    } catch (err) {
+      logger.warn('Image analysis failed', { error: String(err) });
+      return { suggestion: null };
+    }
+  }, {
+    body: t.Object({ image: t.Any() })
+  })
+
+  // ─── Nearby reports (duplicate detection, Track 3) ──
+  // Pure spatial lookup so citizens can add their voice to an existing report
+  // instead of fragmenting pressure with a duplicate. No auth (read-only).
+  .get('/api/reports/nearby', async ({ query, set, store }) => {
+    const reqId = (store as any).requestId;
+    const lat = parseFloat(query.lat as string);
+    const lng = parseFloat(query.lng as string);
+    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      set.status = 400;
+      return { error: 'Valid lat & lng required.' };
+    }
+    // Default 75 m; clamp to a sane range so this can't become a wide scan.
+    let radius = parseFloat(query.radius as string);
+    if (isNaN(radius)) radius = 75;
+    radius = Math.max(10, Math.min(radius, 500));
+    const category = typeof query.category === 'string' && query.category ? query.category : null;
+
+    try {
+      const rows = await sql`
+        SELECT id, title, category, status, upvotes,
+               ROUND(ST_Distance(location, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography)::numeric, 1) AS distance_m
+        FROM reports
+        WHERE status IN ('pending_verification', 'open', 'in_progress')
+          AND ST_DWithin(location, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${radius})
+          AND (${category}::text IS NULL OR category = ${category})
+        ORDER BY ST_Distance(location, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography) ASC
+        LIMIT 5
+      `;
+      return {
+        nearby: rows.map((r: any) => ({
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          status: r.status,
+          upvotes: r.upvotes,
+          distanceM: Number(r.distance_m),
+        })),
+      };
+    } catch (err) {
+      logger.error('Nearby lookup failed', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to find nearby reports', requestId: reqId };
+    }
+  })
+
+  // ─── Notifications (Track 4) ─────────────────
+  .get('/api/notifications', async ({ set, request, store }) => {
+    const reqId = (store as any).requestId;
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required' };
+    }
+    try {
+      const rows = await sql`
+        SELECT id, type, title, body, report_id, is_read, created_at
+        FROM notifications
+        WHERE user_id = ${auth.userId}
+        ORDER BY created_at DESC
+        LIMIT 50
+      `;
+      const [c] = await sql`
+        SELECT COUNT(*)::int AS unread FROM notifications WHERE user_id = ${auth.userId} AND is_read = FALSE
+      `;
+      return {
+        unread: c?.unread || 0,
+        notifications: rows.map((n: any) => ({
+          id: n.id,
+          type: n.type,
+          title: n.title,
+          body: n.body,
+          reportId: n.report_id,
+          isRead: n.is_read,
+          createdAt: n.created_at,
+        })),
+      };
+    } catch (err) {
+      logger.error('Failed to load notifications', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load notifications', requestId: reqId };
+    }
+  })
+
+  .post('/api/notifications/read', async ({ body, set, request }) => {
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required' };
+    }
+    try {
+      const ids = (body as any)?.ids;
+      if (Array.isArray(ids) && ids.length > 0) {
+        const numeric = ids.map((x: any) => Number(x)).filter((x: number) => Number.isInteger(x));
+        await sql`UPDATE notifications SET is_read = TRUE WHERE user_id = ${auth.userId} AND id = ANY(${numeric})`;
+      } else {
+        // No ids → mark all read.
+        await sql`UPDATE notifications SET is_read = TRUE WHERE user_id = ${auth.userId} AND is_read = FALSE`;
+      }
+      return { success: true };
+    } catch (err) {
+      logger.error('Failed to mark notifications read', { error: String(err) });
+      set.status = 500;
+      return { error: 'Failed to update notifications' };
+    }
+  }, {
+    body: t.Optional(t.Object({ ids: t.Optional(t.Array(t.Number())) }))
+  })
+
+  // ─── My Reports (richer, with timeline; Track 4) ──
+  .get('/api/reports/mine', async ({ set, request, store }) => {
+    const reqId = (store as any).requestId;
+    const auth = await verifyAuth(request);
+    if (!requireAuth(auth, set)) {
+      return { error: 'Authentication required' };
+    }
+    try {
+      const reports = await sql`
+        SELECT id, title, category, custom_category, status, severity, agency, ward_name, mla_name,
+               upvotes, verification_count,
+               (SELECT COUNT(*) FROM resolutions rz WHERE rz.report_id = reports.id AND rz.vote = 'fixed')::int AS fixed_count,
+               ST_Y(location::geometry) AS latitude, ST_X(location::geometry) AS longitude,
+               created_at
+        FROM reports
+        WHERE creator_id = ${auth.userId}
+        ORDER BY created_at DESC
+        LIMIT 100
+      `;
+      const ids = reports.map((r: any) => r.id);
+      let events: any[] = [];
+      if (ids.length > 0) {
+        events = await sql`
+          SELECT report_id, from_status, to_status, note, created_at
+          FROM report_status_events
+          WHERE report_id = ANY(${ids})
+          ORDER BY created_at ASC
+        `;
+      }
+      const byReport: Record<string, any[]> = {};
+      for (const e of events) {
+        (byReport[e.report_id] ||= []).push({
+          fromStatus: e.from_status, toStatus: e.to_status, note: e.note, createdAt: e.created_at,
+        });
+      }
+      return {
+        reports: reports.map((r: any) => ({
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          customCategory: r.custom_category,
+          status: r.status,
+          severity: r.severity,
+          agency: r.agency,
+          ward: r.ward_name,
+          mla: r.mla_name,
+          upvotes: r.upvotes,
+          verificationCount: r.verification_count,
+          fixedCount: r.fixed_count,
+          latitude: r.latitude,
+          longitude: r.longitude,
+          timestamp: formatRelativeTime(r.created_at),
+          timeline: byReport[r.id] || [],
+        })),
+      };
+    } catch (err) {
+      logger.error('Failed to load my reports', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load your reports', requestId: reqId };
+    }
+  })
+
   // ─── Leaderboard: Citizens ───────────────────
   .get('/api/leaderboard/citizens', async ({ set, store }) => {
     const reqId = (store as any).requestId;
@@ -715,7 +1171,8 @@ const app = new Elysia({
             m.name,
             m.constituency AS ward,
             m.city,
-            COUNT(CASE WHEN r.status = 'open' THEN 1 END) AS unresolved_count
+            COUNT(CASE WHEN r.status IN ('open', 'in_progress') THEN 1 END) AS unresolved_count,
+            COUNT(CASE WHEN r.status = 'resolved' THEN 1 END) AS resolved_count
           FROM mlas m
           LEFT JOIN reports r ON r.mla_name = m.name
           GROUP BY m.id, m.name, m.constituency, m.city
@@ -730,6 +1187,7 @@ const app = new Elysia({
             ward: m.ward,
             city: m.city,
             unresolvedCount: Number(m.unresolved_count) || 0,
+            resolvedCount: Number(m.resolved_count) || 0,
             rank: i + 1,
           })),
         };
@@ -739,6 +1197,71 @@ const app = new Elysia({
       logger.error('Failed to load wall of shame', { error: String(err), requestId: reqId });
       set.status = 500;
       return { error: 'Failed to load leaderboard', requestId: reqId };
+    }
+  })
+
+  // ─── Civic Health (real data for LiveabilityDashboard; Track 4) ──
+  // Aggregates reports per constituency into a livability picture: totals,
+  // status mix, resolution rate, and the best/worst areas. Pure SQL (cached).
+  .get('/api/civic-health', async ({ set, store }) => {
+    const reqId = (store as any).requestId;
+    try {
+      const result = await withTtlCache('civic-health', 120_000, async () => {
+        const areas = await sql`
+          SELECT
+            COALESCE(NULLIF(ward_name, ''), 'Unknown') AS area,
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status IN ('open', 'in_progress'))::int AS unresolved,
+            COUNT(*) FILTER (WHERE status = 'resolved')::int AS resolved
+          FROM reports
+          WHERE status <> 'pending_verification' AND status <> 'rejected'
+          GROUP BY COALESCE(NULLIF(ward_name, ''), 'Unknown')
+          HAVING COUNT(*) >= 1
+        `;
+
+        const scored = areas.map((a: any) => {
+          const total = Number(a.total);
+          const resolved = Number(a.resolved);
+          // Livability score: resolution rate, lightly penalised by open volume.
+          const resolutionRate = total > 0 ? resolved / total : 0;
+          const score = Math.round(resolutionRate * 100);
+          return {
+            area: a.area,
+            total,
+            unresolved: Number(a.unresolved),
+            resolved,
+            resolutionRate: Math.round(resolutionRate * 100),
+            score,
+          };
+        });
+
+        const best = [...scored].sort((x, y) => y.score - x.score || y.total - x.total).slice(0, 5);
+        const worst = [...scored].sort((x, y) => x.score - y.score || y.unresolved - x.unresolved).slice(0, 5);
+
+        const [totals] = await sql`
+          SELECT
+            COUNT(*) FILTER (WHERE status IN ('open','in_progress'))::int AS unresolved,
+            COUNT(*) FILTER (WHERE status = 'resolved')::int AS resolved,
+            COUNT(*) FILTER (WHERE status <> 'pending_verification' AND status <> 'rejected')::int AS total
+          FROM reports
+        `;
+
+        return {
+          summary: {
+            total: totals?.total || 0,
+            unresolved: totals?.unresolved || 0,
+            resolved: totals?.resolved || 0,
+            resolutionRate: totals && totals.total > 0 ? Math.round((totals.resolved / totals.total) * 100) : 0,
+          },
+          best,
+          worst,
+        };
+      });
+      return result;
+    } catch (err) {
+      logger.error('Failed to load civic health', { error: String(err), requestId: reqId });
+      set.status = 500;
+      return { error: 'Failed to load civic health', requestId: reqId };
     }
   })
 

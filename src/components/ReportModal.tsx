@@ -1,27 +1,38 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Camera, Check, MapPin, ChevronLeft, Loader2, AlertCircle } from 'lucide-react';
+import { Camera, Check, MapPin, ChevronLeft, Loader2, AlertCircle, Sparkles } from 'lucide-react';
 import clsx from 'clsx';
-import type { IssueCategory } from '../types';
+import type { IssueCategory, IssueSeverity } from '../types';
+import { api } from '../lib/api';
+import { useAuth } from '../lib/auth-provider';
 
 interface ReportModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (category: IssueCategory, customCategory: string | undefined, imageFile: File | null) => void;
+  onSubmit: (category: IssueCategory, customCategory: string | undefined, imageFile: File | null, severity: IssueSeverity) => void;
 }
 
 export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalProps) {
-  const [step, setStep] = useState<1 | 2 | 3 | 4>(1); 
+  const { getToken } = useAuth();
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<IssueCategory | null>(null);
   const [customCategory, setCustomCategory] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [severity, setSeverity] = useState<IssueSeverity>('medium');
+  const [aiNote, setAiNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
-      setTimeout(() => setStep(1), 400); // Reset state after close animation
+      setTimeout(() => {
+        setStep(1);
+        setSelectedCategory(null);
+        setCustomCategory('');
+        setSeverity('medium');
+        setAiNote(null);
+      }, 400); // Reset state after close animation
     }
   }, [isOpen]);
 
@@ -33,19 +44,31 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
     }, 1200);
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      const url = URL.createObjectURL(file);
-      setPreviewUrl(url);
-      
-      setIsUploading(true);
-      // Simulate mapping extraction but keep the real file
-      setTimeout(() => {
-        setIsUploading(false);
-        setStep(3);
-      }, 1500);
+    if (!file) return;
+    setSelectedFile(file);
+    setPreviewUrl(URL.createObjectURL(file));
+    setIsUploading(true);
+    setAiNote(null);
+
+    // Real AI photo analysis (Track 3): suggest category + severity. Degrades
+    // gracefully — if no vision model is configured or the call fails, we just
+    // advance to manual selection (the previous behaviour).
+    try {
+      const token = await getToken();
+      const { suggestion } = await api.analyzeReportImage(file, token) as
+        { suggestion: null | { category: string; severity: IssueSeverity; description?: string; isCivicIssue?: boolean } };
+      if (suggestion && suggestion.isCivicIssue !== false) {
+        setSelectedCategory(suggestion.category as IssueCategory);
+        if (suggestion.severity) setSeverity(suggestion.severity);
+        setAiNote(suggestion.description ? `AI: ${suggestion.description}` : 'AI pre-filled the details below — adjust if needed.');
+      }
+    } catch {
+      /* not signed in / no vision model / offline → manual selection */
+    } finally {
+      setIsUploading(false);
+      setStep(3);
     }
   };
 
@@ -54,7 +77,7 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
     if (selectedCategory === 'Other' && !customCategory.trim()) return;
     setStep(4);
     setTimeout(() => {
-      onSubmit(selectedCategory, selectedCategory === 'Other' ? customCategory : undefined, selectedFile);
+      onSubmit(selectedCategory, selectedCategory === 'Other' ? customCategory : undefined, selectedFile, severity);
       onClose();
       // Cleanup
       setSelectedFile(null);
@@ -99,8 +122,8 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
               <div className="flex-1 flex flex-col items-center justify-center min-h-[300px] border-2 border-[var(--color-neon-amber)] border-dashed rounded-3xl bg-[var(--color-neon-amber)]/5 relative overflow-hidden">
                 <div className="absolute inset-0 bg-gradient-to-t from-[var(--color-neon-amber)]/20 to-transparent animate-pulse" />
                 <MapPin size={48} className="text-[var(--color-neon-amber)] mb-4 animate-bounce" />
-                <h3 className="font-bold text-lg mb-1 relative z-10 text-[var(--color-neon-amber)]">Extracting coordinates...</h3>
-                <p className="text-sm text-[var(--color-neon-amber)]/60 relative z-10">Compressing media & scanning data</p>
+                <h3 className="font-bold text-lg mb-1 relative z-10 text-[var(--color-neon-amber)]">Analysing photo…</h3>
+                <p className="text-sm text-[var(--color-neon-amber)]/60 relative z-10">AI is classifying the issue &amp; severity</p>
                 <div className="w-48 h-1 bg-[var(--color-neon-amber)]/20 rounded-full mt-6 overflow-hidden">
                   <motion.div 
                     initial={{ width: 0 }} 
@@ -132,8 +155,15 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
         
         return (
           <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col h-full">
-            <h2 className="text-2xl font-bold mb-6">Classify Issue</h2>
-            
+            <h2 className="text-2xl font-bold mb-4">Classify Issue</h2>
+
+            {aiNote && (
+              <div className="mb-4 flex items-start gap-2 bg-[var(--color-neon-amber)]/10 border border-[var(--color-neon-amber)]/30 rounded-2xl p-3">
+                <Sparkles size={16} className="text-[var(--color-neon-amber)] mt-0.5 shrink-0" />
+                <span className="text-xs text-[var(--color-neon-amber)] leading-snug">{aiNote}</span>
+              </div>
+            )}
+
             <div className={`grid gap-3 flex-1 ${categories.length > 4 ? 'grid-cols-3' : 'grid-cols-2'}`}>
               {categories.map((cat) => (
                 <button
@@ -141,8 +171,8 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
                   onClick={() => setSelectedCategory(cat)}
                   className={clsx(
                     "flex flex-col items-center justify-center p-4 rounded-3xl border-2 transition-all active:scale-[0.98] gap-2",
-                    selectedCategory === cat 
-                      ? "border-[var(--color-neon-amber)] bg-[var(--color-neon-amber)]/10 text-[var(--color-neon-amber)]" 
+                    selectedCategory === cat
+                      ? "border-[var(--color-neon-amber)] bg-[var(--color-neon-amber)]/10 text-[var(--color-neon-amber)]"
                       : "border-white/10 bg-white/5 text-white/80 hover:bg-white/10"
                   )}
                 >
@@ -150,6 +180,27 @@ export default function ReportModal({ isOpen, onClose, onSubmit }: ReportModalPr
                   <span className="font-bold text-center text-xs">{cat}</span>
                 </button>
               ))}
+            </div>
+
+            {/* Severity — pre-filled by AI, editable by the reporter */}
+            <div className="mt-4">
+              <span className="text-[10px] uppercase tracking-widest text-white/40 font-bold">Severity</span>
+              <div className="grid grid-cols-4 gap-2 mt-2">
+                {(['low', 'medium', 'high', 'critical'] as IssueSeverity[]).map((sv) => {
+                  const color = sv === 'critical' ? 'var(--color-danger-red)' : sv === 'high' ? 'var(--color-neon-amber)' : sv === 'medium' ? '#FFD700' : '#00FF41';
+                  const active = severity === sv;
+                  return (
+                    <button
+                      key={sv}
+                      onClick={() => setSeverity(sv)}
+                      className={clsx('py-2 rounded-xl border text-[11px] font-bold uppercase tracking-wide transition-all', active ? 'border-current' : 'border-white/10 text-white/50 bg-white/5')}
+                      style={active ? { color, borderColor: color, background: `${color}1a` } : undefined}
+                    >
+                      {sv}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <AnimatePresence>

@@ -99,6 +99,76 @@ export const api = {
     return handleResponse(res);
   },
 
+  // Resolution lifecycle: vote 'working' (work has started) or 'fixed' (resolved).
+  // Server applies consensus (2 working → in_progress, 3 fixed → resolved).
+  async resolveReport(reportId: string, vote: 'working' | 'fixed', token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/reports/${reportId}/resolve`, {
+      method: 'POST',
+      headers: authHeaders(token || null),
+      body: JSON.stringify({ vote }),
+    });
+    return handleResponse(res);
+  },
+
+  // Draft a formal complaint/escalation for a report (AI or template).
+  async getComplaint(reportId: string, token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/reports/${reportId}/complaint`, {
+      method: 'POST',
+      headers: authHeaders(token || null),
+    });
+    return handleResponse(res);
+  },
+
+  // AI photo analysis — suggest category + severity from an image. Returns
+  // { suggestion: null } (not an error) when no vision model is configured.
+  async analyzeReportImage(image: File, token?: string | null) {
+    const form = new FormData();
+    form.append('image', image);
+    const res = await fetch(`${API_BASE}/api/reports/analyze-image`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+    return handleResponse(res);
+  },
+
+  // Duplicate detection — nearby open/in-progress reports (spatial).
+  async getNearbyReports(lat: number, lng: number, category?: string, radius = 75) {
+    const params = new URLSearchParams({ lat: String(lat), lng: String(lng), radius: String(radius) });
+    if (category) params.set('category', category);
+    const res = await fetch(`${API_BASE}/api/reports/nearby?${params}`);
+    const data = await res.json();
+    return data.nearby || [];
+  },
+
+  // In-app notifications (Track 4).
+  async getNotifications(token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/notifications`, { headers: authHeaders(token || null) });
+    return handleResponse(res); // { unread, notifications }
+  },
+
+  async markNotificationsRead(ids?: number[], token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/notifications/read`, {
+      method: 'POST',
+      headers: authHeaders(token || null),
+      body: JSON.stringify(ids && ids.length ? { ids } : {}),
+    });
+    return handleResponse(res);
+  },
+
+  // The signed-in user's own reports, with status timeline (Track 4).
+  async getMyReports(token?: string | null) {
+    const res = await fetch(`${API_BASE}/api/reports/mine`, { headers: authHeaders(token || null) });
+    const data = await handleResponse(res) as { reports?: unknown[] };
+    return data.reports || [];
+  },
+
+  // Area civic-health metrics for the Liveability dashboard (Track 4).
+  async getCivicHealth() {
+    const res = await fetch(`${API_BASE}/api/civic-health`);
+    return handleResponse(res); // { summary, best, worst }
+  },
+
   async getCitizenLeaderboard() {
     const res = await fetch(`${API_BASE}/api/leaderboard/citizens`);
     const data = await res.json();
