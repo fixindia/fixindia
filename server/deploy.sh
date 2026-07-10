@@ -39,11 +39,22 @@ if ! command -v pm2 &> /dev/null; then
   npm install -g pm2
 fi
 
-# Start or restart the application
-echo "🔄 Restarting application..."
-pm2 delete fixindia-api 2>/dev/null || true
-pm2 delete fixindia-admin-api 2>/dev/null || true
-pm2 start ecosystem.config.json
+# Start or restart the application.
+# IMPORTANT: never `pm2 delete` + `pm2 start` — that drops the service and, if a
+# stray (non-PM2) bun process is still bound to the port, SO_REUSEPORT leaves TWO
+# listeners round-robining between old and new code (a real auth-bypass we hit in
+# prod). So: (1) kill any listener that PM2 does NOT own, then (2) startOrReload.
+echo "🔄 Reloading application..."
+PM2_PIDS="$(pm2 jlist 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print(" ".join(str(p["pid"]) for p in d if p.get("pid")))' 2>/dev/null || true)"
+for port in 6969 6970; do
+  for pid in $(lsof -ti tcp:$port 2>/dev/null || true); do
+    case " $PM2_PIDS " in
+      *" $pid "*) : ;;                        # owned by PM2 — leave it
+      *) echo "  ⚠️  killing stray listener pid $pid on :$port"; kill -9 "$pid" 2>/dev/null || true ;;
+    esac
+  done
+done
+pm2 startOrReload ecosystem.config.json --update-env
 pm2 save
 
 # Health check
